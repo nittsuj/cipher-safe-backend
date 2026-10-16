@@ -1,0 +1,23 @@
+[project]
+name = "cipher-safe-backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "nittsuj", email = "justinvalentino88@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "django>=6.1.2",
+    "django-cors-headers>=4.9.0",
+    "djangorestframework>=3.18.3",
+    "psycopg2-binary>=2.9.13",
+    "pycryptodome>=4.0.0",
+]
+
+[project.scripts]
+cipher-safe-backend = "cipher_safe_backend:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
