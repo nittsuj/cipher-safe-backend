@@ -10,9 +10,11 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+from datetime import timedelta
 from pathlib import Path
 
 import environ
+from corsheaders.defaults import default_headers
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,12 +29,14 @@ environ.Env.read_env(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-e(dnca9h=-lzu-@3(gb(je2h&sjssvytfcqdhqx5o533lk1wn7'
+# Required with no default: a missing key fails fast instead of silently
+# falling back to a public value that would let anyone forge sessions and tokens.
+SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env.bool("DJANGO_DEBUG", default=False)
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 
 
 # Application definition
@@ -44,9 +48,17 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    # Third-party
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
+    'corsheaders',
+    # Local
+    'core',
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -79,7 +91,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-# All values come from the environment / .env — see .env.example.
+# All values come from the environment / .env (see .env.example).
 # POSTGRES_DB, POSTGRES_USER and POSTGRES_PASSWORD are required;
 # HOST and PORT default to the docker-compose db service as seen from the host.
 DATABASES = {
@@ -92,6 +104,70 @@ DATABASES = {
         'PORT': env('POSTGRES_PORT', default='5432'),
     }
 }
+
+
+# Custom user model: credentials only; private data lives encrypted elsewhere.
+AUTH_USER_MODEL = 'core.User'
+
+
+# Django REST Framework
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
+    ],
+    # Rate limiting. Counters live in the cache backend; the default in-memory
+    # cache is per-process, so a multi-worker deployment should point CACHES at
+    # a shared backend (for example Redis).
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': env('THROTTLE_ANON', default='20/min'),
+        'user': env('THROTTLE_USER', default='240/min'),
+        'auth': env('THROTTLE_AUTH', default='10/min'),
+        'benchmark': env('THROTTLE_BENCHMARK', default='10/min'),
+    },
+}
+
+
+# JSON Web Token settings (djangorestframework-simplejwt).
+# Access tokens are short-lived; refresh tokens rotate and the previous one is
+# blacklisted on each refresh and on logout, so a leaked refresh token cannot be
+# replayed. Access tokens stay valid for their (short) lifetime regardless.
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=env.int('JWT_ACCESS_MINUTES', default=15)),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=env.int('JWT_REFRESH_DAYS', default=1)),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+
+# Cross-origin access for the SPA frontend (cipher-safe-frontend).
+CORS_ALLOWED_ORIGINS = env.list(
+    'CORS_ALLOWED_ORIGINS',
+    default=['http://localhost:5173', 'http://127.0.0.1:5173'],
+)
+CORS_ALLOW_CREDENTIALS = True
+# Custom header carrying the cipher password on crypto endpoints.
+CORS_ALLOW_HEADERS = (*default_headers, 'x-cipher-password')
+
+
+# File uploads: videos are large, so raise the in-memory threshold.
+FILE_UPLOAD_MAX_MEMORY_SIZE = env.int('FILE_UPLOAD_MAX_MEMORY_SIZE', default=64 * 1024 * 1024)
+DATA_UPLOAD_MAX_MEMORY_SIZE = env.int('DATA_UPLOAD_MAX_MEMORY_SIZE', default=512 * 1024 * 1024)
+
+# Largest file accepted by the upload endpoint. Enforced before the file is
+# read into memory and encrypted.
+MAX_UPLOAD_BYTES = env.int('MAX_UPLOAD_BYTES', default=128 * 1024 * 1024)
 
 
 # Password validation
@@ -125,17 +201,22 @@ USE_I18N = True
 USE_TZ = True
 
 
+# Default primary key field type
+# https://docs.djangoproject.com/en/6.1/ref/settings/#default-auto-field
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
 
+# Media files: encrypted ciphertext blobs are written here.
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
