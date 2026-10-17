@@ -1,7 +1,7 @@
 [project]
 name = "cipher-safe-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "Django + DRF backend that encrypts personal data and files with AES, DES and RC4."
 readme = "README.md"
 authors = [
     { name = "nittsuj", email = "justinvalentino88@gmail.com" }
@@ -12,13 +12,12 @@ dependencies = [
     "django-cors-headers>=4.9.0",
     "django-environ>=0.14.0",
     "djangorestframework>=3.18.3",
+    "djangorestframework-simplejwt>=5.5.1",
     "psycopg2-binary>=2.9.13",
     "pycryptodome>=4.0.0",
 ]
 
-[project.scripts]
-cipher-safe-backend = "cipher_safe_backend:main"
-
-[build-system]
-requires = ["uv_build>=0.12.13,<0.13.0"]
-build-backend = "uv_build"
+# This is a Django application, not an importable library: there is no package
+# to build or install, so tell uv to only manage the environment.
+[tool.uv]
+package = false

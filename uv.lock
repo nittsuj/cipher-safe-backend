@@ -14,12 +14,13 @@ wheels = [
 [[package]]
 name = "cipher-safe-backend"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "django" },
     { name = "django-cors-headers" },
     { name = "django-environ" },
     { name = "djangorestframework" },
+    { name = "djangorestframework-simplejwt" },
     { name = "psycopg2-binary" },
     { name = "pycryptodome" },
 ]
@@ -30,6 +31,7 @@ requires-dist = [
     { name = "django-cors-headers", specifier = ">=4.9.0" },
     { name = "django-environ", specifier = ">=0.14.0" },
     { name = "djangorestframework", specifier = ">=3.18.3" },
+    { name = "djangorestframework-simplejwt", specifier = ">=5.5.1" },
     { name = "psycopg2-binary", specifier = ">=2.9.13" },
     { name = "pycryptodome", specifier = ">=4.0.0" },
 ]
@@ -80,6 +82,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8d/b2/1cee76b188301f7d03169ca77fab2b3d3ec5d01b3469189f944af2d7f11a/djangorestframework-3.18.3.tar.gz", hash = "sha256:446a9b352e7eff630421ab3f2328bd2401b109a9470afa4a31189994911ed030", size = 923563, upload-time = "2026-10-06T21:33:51.521Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c4/dd/de5f4543765bec94e036a5e9593a42f8fa7efec8de78eb56b9ca834385f3/djangorestframework-3.18.3-py3-none-any.whl", hash = "sha256:8544bb674846731b1e3c9b309236ee1dc412905a0aa725be2ec193ca950a7d12", size = 903986, upload-time = "2026-10-06T21:33:49.917Z" },
+]
+
+[[package]]
+name = "djangorestframework-simplejwt"
+version = "5.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "djangorestframework" },
+    { name = "pyjwt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/27/2874a325c11112066139769f7794afae238a07ce6adf96259f08fd37a9d7/djangorestframework_simplejwt-5.5.1.tar.gz", hash = "sha256:e72c5572f51d7803021288e2057afcbd03f17fe11d484096f40a460abc76e87f", size = 101265, upload-time = "2025-07-21T16:52:25.026Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/94/fdfb7b2f0b16cd3ed4d4171c55c1c07a2d1e3b106c5978c8ad0c15b4a48b/djangorestframework_simplejwt-5.5.1-py3-none-any.whl", hash = "sha256:2c30f3707053d384e9f315d11c2daccfcb548d4faa453111ca19a542b732e469", size = 107674, upload-time = "2025-07-21T16:52:07.493Z" },
 ]
 
 [[package]]
@@ -158,6 +174,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/05/19/e103a1a7d9b1bc9bb66783be7fb77d1ee7d65e3121ca0163295696630d72/pycryptodome-4.0.0-cp39-abi3-win32.whl", hash = "sha256:fdf963015e74982507c4c09961c2ec3213afc9cd991bb1c8f875ec2caac97d37", size = 1167435, upload-time = "2026-10-14T10:45:23.205Z" },
     { url = "https://files.pythonhosted.org/packages/5a/ba/c86194cb41d374837988161242af4217db5a10c9bc93e4136373bf5c07c6/pycryptodome-4.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:077819384ceb90461af9c398c1dfdb7da01a6e17b7c98817831404fb5bd93c1f", size = 1210289, upload-time = "2026-10-14T10:45:25.484Z" },
     { url = "https://files.pythonhosted.org/packages/4e/40/51a1d6234014fb8d68169cc53b44d1b315c30a261794460fef66d3df084c/pycryptodome-4.0.0-cp39-abi3-win_arm64.whl", hash = "sha256:4aea6fe5e78dda66a369d23f49fc69cfc433f8e1a1d36bda3d0466f69860ccb2", size = 1155633, upload-time = "2026-10-14T10:45:27.397Z" },
+]
+
+[[package]]
+name = "pyjwt"
+version = "2.15.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/43/ea/5194e52748b0da83d71e082d75496eaec6e58f419f5e184786ded517e6a9/pyjwt-2.15.1.tar.gz", hash = "sha256:4f259e80cdfb6b3fc18a7de51fd1ef9ec79652f25019bae68975ca2468a34df8", size = 121252, upload-time = "2026-09-28T18:40:42.598Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl", hash = "sha256:42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193", size = 33860, upload-time = "2026-09-28T18:40:41.429Z" },
 ]
 
 [[package]]
