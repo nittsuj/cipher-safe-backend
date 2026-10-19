@@ -1,0 +1,342 @@
+{
+  "host": {
+    "python": "3.13.4",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "processor": "AMD64 Family 23 Model 104 Stepping 1, AuthenticAMD",
+    "machine": "AMD64"
+  },
+  "pbkdf2_rounds": 600000,
+  "runs_per_case": 10,
+  "sizes": [
+    {
+      "label": "PII field",
+      "plaintext_size": 64,
+      "algorithm": "AES",
+      "mode": "CBC",
+      "ciphertext_size": 80,
+      "encrypt_cipher_ms": 72.50779999958468,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 392.371859999912,
+        "min": 345.37300000010873,
+        "max": 464.8746000002575,
+        "stdev": 36.26820911739493
+      },
+      "cipher_ms": {
+        "mean": 0.10287000022799475,
+        "min": 0.06329999996523838,
+        "max": 0.15900000107649248,
+        "stdev": 0.03240932833259854
+      },
+      "mb_per_s": 0.5933231857171715
+    },
+    {
+      "label": "PII field",
+      "plaintext_size": 64,
+      "algorithm": "DES",
+      "mode": "CBC",
+      "ciphertext_size": 72,
+      "encrypt_cipher_ms": 0.2390000008745119,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 377.2296600000118,
+        "min": 351.63029999966966,
+        "max": 410.82879999885336,
+        "stdev": 24.245023856364966
+      },
+      "cipher_ms": {
+        "mean": 0.10555999997450272,
+        "min": 0.07340000047406647,
+        "max": 0.14850000115984585,
+        "stdev": 0.02583603007805776
+      },
+      "mb_per_s": 0.5782034507838444
+    },
+    {
+      "label": "PII field",
+      "plaintext_size": 64,
+      "algorithm": "RC4",
+      "mode": "-",
+      "ciphertext_size": 64,
+      "encrypt_cipher_ms": 0.08650000017951243,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 365.2564699996219,
+        "min": 337.1004999989964,
+        "max": 405.8687999986432,
+        "stdev": 21.55186773380253
+      },
+      "cipher_ms": {
+        "mean": 0.05451000015455065,
+        "min": 0.040699998862692155,
+        "max": 0.07450000157405157,
+        "stdev": 0.010203970181539289
+      },
+      "mb_per_s": 1.1197056700962897
+    },
+    {
+      "label": "ID card image",
+      "plaintext_size": 524288,
+      "algorithm": "AES",
+      "mode": "CBC",
+      "ciphertext_size": 524304,
+      "encrypt_cipher_ms": 1.6083000009530224,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 382.24003999966953,
+        "min": 354.7632000008889,
+        "max": 420.7883999988553,
+        "stdev": 23.23532414565315
+      },
+      "cipher_ms": {
+        "mean": 1.613099999303813,
+        "min": 1.420700000380748,
+        "max": 1.86309999844525,
+        "stdev": 0.12543841290290986
+      },
+      "mb_per_s": 309.9621847472516
+    },
+    {
+      "label": "ID card image",
+      "plaintext_size": 524288,
+      "algorithm": "DES",
+      "mode": "CBC",
+      "ciphertext_size": 524296,
+      "encrypt_cipher_ms": 9.731299998748,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 371.3832099998399,
+        "min": 336.0047999995004,
+        "max": 409.1785999989952,
+        "stdev": 25.69516478891066
+      },
+      "cipher_ms": {
+        "mean": 7.747509999717295,
+        "min": 7.076599998981692,
+        "max": 10.035100000095554,
+        "stdev": 0.8797232061430675
+      },
+      "mb_per_s": 64.53686410449872
+    },
+    {
+      "label": "ID card image",
+      "plaintext_size": 524288,
+      "algorithm": "RC4",
+      "mode": "-",
+      "ciphertext_size": 524288,
+      "encrypt_cipher_ms": 2.0678000000771135,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 365.20827999993344,
+        "min": 344.75059999931545,
+        "max": 425.77669999991485,
+        "stdev": 23.19123893481163
+      },
+      "cipher_ms": {
+        "mean": 1.8079999999827123,
+        "min": 1.682000000073458,
+        "max": 2.006999999139225,
+        "stdev": 0.1042048299658303
+      },
+      "mb_per_s": 276.548672569016
+    },
+    {
+      "label": "Document",
+      "plaintext_size": 4194304,
+      "algorithm": "AES",
+      "mode": "CBC",
+      "ciphertext_size": 4194320,
+      "encrypt_cipher_ms": 11.918099999093101,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 378.2702699998481,
+        "min": 343.1455999998434,
+        "max": 418.4522999985347,
+        "stdev": 25.55372095134083
+      },
+      "cipher_ms": {
+        "mean": 12.787979999666277,
+        "min": 11.045200000808109,
+        "max": 17.75209999868821,
+        "stdev": 2.632915920812446
+      },
+      "mb_per_s": 312.7937328729312
+    },
+    {
+      "label": "Document",
+      "plaintext_size": 4194304,
+      "algorithm": "DES",
+      "mode": "CBC",
+      "ciphertext_size": 4194312,
+      "encrypt_cipher_ms": 62.43880000147328,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 378.7844499998755,
+        "min": 351.2273999986064,
+        "max": 437.02459999985876,
+        "stdev": 27.951388730766443
+      },
+      "cipher_ms": {
+        "mean": 61.98480000002746,
+        "min": 56.9298999998864,
+        "max": 81.09680000052322,
+        "stdev": 7.346534175873778
+      },
+      "mb_per_s": 64.53194976830171
+    },
+    {
+      "label": "Document",
+      "plaintext_size": 4194304,
+      "algorithm": "RC4",
+      "mode": "-",
+      "ciphertext_size": 4194304,
+      "encrypt_cipher_ms": 14.619199999287957,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 383.85304999974323,
+        "min": 350.6177999988722,
+        "max": 466.7755999998917,
+        "stdev": 36.39193595846156
+      },
+      "cipher_ms": {
+        "mean": 14.828809999926307,
+        "min": 13.271200001327088,
+        "max": 16.817299998365343,
+        "stdev": 1.1793735316240772
+      },
+      "mb_per_s": 269.74517847486607
+    },
+    {
+      "label": "Video",
+      "plaintext_size": 33554432,
+      "algorithm": "AES",
+      "mode": "CBC",
+      "ciphertext_size": 33554448,
+      "encrypt_cipher_ms": 94.24269999908574,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 397.4861899998359,
+        "min": 341.5666000000783,
+        "max": 432.5157000002946,
+        "stdev": 24.48639398985019
+      },
+      "cipher_ms": {
+        "mean": 102.13636000007682,
+        "min": 86.58660000037344,
+        "max": 162.9493000000366,
+        "stdev": 22.69350164873526
+      },
+      "mb_per_s": 313.3066422180694
+    },
+    {
+      "label": "Video",
+      "plaintext_size": 33554432,
+      "algorithm": "DES",
+      "mode": "CBC",
+      "ciphertext_size": 33554440,
+      "encrypt_cipher_ms": 556.2826000004861,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 373.41577999995934,
+        "min": 333.3464000006643,
+        "max": 446.040400000129,
+        "stdev": 29.18601953723734
+      },
+      "cipher_ms": {
+        "mean": 479.70522999949026,
+        "min": 432.5799999987794,
+        "max": 542.972600000212,
+        "stdev": 31.111121618446475
+      },
+      "mb_per_s": 66.70763210155954
+    },
+    {
+      "label": "Video",
+      "plaintext_size": 33554432,
+      "algorithm": "RC4",
+      "mode": "-",
+      "ciphertext_size": 33554432,
+      "encrypt_cipher_ms": 113.64879999928235,
+      "runs": 10,
+      "kdf_ms": {
+        "mean": 366.25343000014254,
+        "min": 337.0764999999665,
+        "max": 409.812800000509,
+        "stdev": 22.635370422648663
+      },
+      "cipher_ms": {
+        "mean": 112.13797999989765,
+        "min": 105.91899999963061,
+        "max": 130.59350000003178,
+        "stdev": 7.240327265338135
+      },
+      "mb_per_s": 285.36272902391505
+    }
+  ],
+  "modes": [
+    {
+      "algorithm": "AES",
+      "mode": "CBC",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194320,
+      "overhead": 16,
+      "cipher_ms": 14.240366666854243
+    },
+    {
+      "algorithm": "AES",
+      "mode": "CFB",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 119.90899999970377
+    },
+    {
+      "algorithm": "AES",
+      "mode": "OFB",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 12.510233333159704
+    },
+    {
+      "algorithm": "AES",
+      "mode": "CTR",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 3.7727666670737867
+    },
+    {
+      "algorithm": "DES",
+      "mode": "CBC",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194312,
+      "overhead": 8,
+      "cipher_ms": 55.78780000056819
+    },
+    {
+      "algorithm": "DES",
+      "mode": "CFB",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 431.4892666667826
+    },
+    {
+      "algorithm": "DES",
+      "mode": "OFB",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 59.21899999945405
+    },
+    {
+      "algorithm": "DES",
+      "mode": "CTR",
+      "plaintext_size": 4194304,
+      "ciphertext_size": 4194304,
+      "overhead": 0,
+      "cipher_ms": 52.20800000036737
+    }
+  ]
+}
