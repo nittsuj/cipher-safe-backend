@@ -7,16 +7,17 @@ stays framework free); the file-category choices are defined here.
 
 from __future__ import annotations
 
-from .crypto import DEFAULT_MODE, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
+from .crypto import DEFAULT_MODE, MODE_FOR, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
 
 ALGORITHM_CHOICES = [(value, value) for value in SUPPORTED_ALGORITHMS]
 MODE_CHOICES = [(value, value) for value in SUPPORTED_MODES]
 
+#: What a patient keeps in the vault. The keys are stable identifiers; the
+#: labels describe the medical-records scenario.
 FILE_CATEGORY_CHOICES = [
-    ("ID_CARD", "ID card image"),
-    ("DOCUMENT", "PDF / DOC / XLS document"),
-    ("VIDEO", "Video"),
-    ("OTHER", "Other"),
+    ("ID_CARD", "Identity / insurance card scan (KTP, BPJS card)"),
+    ("DOCUMENT", "Medical document (lab result, referral letter, medication log)"),
+    ("VIDEO", "Medical video (ultrasound, echocardiogram, endoscopy)"),
 ]
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "MODE_CHOICES",
     "FILE_CATEGORY_CHOICES",
     "DEFAULT_MODE",
+    "MODE_FOR",
     "SUPPORTED_ALGORITHMS",
     "SUPPORTED_MODES",
 ]

@@ -6,9 +6,9 @@ from .models import DownloadEvent, EncryptedValue, FileCiphertext, PersonalData,
 
 @admin.register(StoredFile)
 class StoredFileAdmin(admin.ModelAdmin):
-    list_display = ("id", "original_name", "category", "owner", "plaintext_size", "created_at")
+    list_display = ("id", "category", "owner", "plaintext_size", "created_at")
     list_filter = ("category",)
-    search_fields = ("original_name", "owner__username")
+    search_fields = ("owner__username",)
 
 
 @admin.register(FileCiphertext)
