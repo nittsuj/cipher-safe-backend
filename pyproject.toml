@@ -1,7 +1,7 @@
 [project]
 name = "cipher-safe-backend"
 version = "0.1.0"
-description = "Django + DRF backend that encrypts personal data and files with AES, DES and RC4."
+description = "Patient-held medical records vault: Django + DRF backend that encrypts patient data and files with AES, DES and RC4."
 readme = "README.md"
 authors = [
     { name = "nittsuj", email = "justinvalentino88@gmail.com" }

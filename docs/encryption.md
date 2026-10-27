@@ -1,319 +1,278 @@
 # Implementing AES, DES and RC4 Encryption
 
-This guide explains how Cipher Safe performs symmetric encryption with the
-three required algorithms (**AES**, **DES** and **RC4**), why each decision was
-made, and how the pieces fit together. The working code lives in
-[`core/crypto/`](../core/crypto) and is wired to the database in
-[`core/services.py`](../core/services.py).
+This guide explains how Cipher Safe, a **patient-held medical records vault**,
+encrypts every patient record with the three required algorithms (**AES**,
+**DES** and **RC4**), why each decision was made, and how the pieces fit
+together. The working code lives in [`core/crypto/`](../core/crypto) and is
+wired to the database in [`core/services.py`](../core/services.py).
 
 ## Origin
 
 The cipher core is adapted from the lab reference implementation
 [`ukassu/lab-session-information-security`](https://github.com/ukassu/lab-session-information-security)
 (`crypto_tool.py`), which provides the PBKDF2 key derivation, PKCS#7 padding and
-AES-256-CBC / DES-CBC / RC4 primitives. This project extends it with the CFB,
-OFB and CTR modes and restructures it into a framework-free `core/crypto/`
-package.
+AES-256-CBC / DES-CBC / RC4 primitives. This project adds the CFB, OFB and CTR
+modes, uses CTR for stored data, adds encrypt-then-MAC integrity, and
+restructures the code into a framework-free `core/crypto/` package.
 
 ## Design goals
 
-- Derive every key from the user's **password** (never store a key).
-- Store each item **three times**, once per algorithm, so the same data can be
-  decrypted with any of them.
-- Use a **non-ECB** block mode for the block ciphers.
-- Keep the primitives **framework-free** so they can be unit-tested in isolation.
-- Record **timing** for each operation so the algorithms can be compared.
+- Derive every key from the patient's **password**; never store a key.
+- Store each item **three times**, once per algorithm, as the assignment
+  requires, so any of the three copies can be decrypted.
+- Use a **non-ECB** mode for the block ciphers: **CTR** for both AES and DES.
+- Return data **intact or not at all**: every ciphertext carries an
+  **HMAC-SHA256** tag that is verified before decryption.
+- Keep the primitives **framework-free** so they can be unit-tested and
+  benchmarked in isolation.
+- Record **timing** per operation (key derivation, cipher, MAC) for the analysis.
 
 ## Dependencies
 
-The ciphers come from [PyCryptodome](https://pycryptodome.readthedocs.io/):
-
-```bash
-pip install pycryptodome
-```
+The ciphers come from [PyCryptodome](https://pycryptodome.readthedocs.io/); the
+MAC uses Python's standard `hmac` and `hashlib`:
 
 ```python
 from Crypto.Cipher import AES, ARC4, DES
 from Crypto.Util import Counter
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Hash import SHA256
+import hashlib, hmac
 ```
 
 ## 1. Key derivation (PBKDF2-HMAC-SHA256)
 
-A password is not usable as a raw key: AES needs 32 bytes, DES needs 8, and a
-password can be any length. So each operation derives a key with
-**PBKDF2-HMAC-SHA256**, using a **fresh random 16-byte salt**:
+A password is not usable as a raw key: AES needs 32 bytes, DES 8, and a password
+can be any length with little entropy per character. Each operation therefore
+derives key material with **PBKDF2-HMAC-SHA256** (600,000 iterations) over a
+**fresh random 16-byte salt**. One derivation produces both the cipher key and a
+separate 32-byte MAC key ([`keys.py`](../core/crypto/keys.py)):
 
 ```python
-import secrets
-from Crypto.Protocol.KDF import PBKDF2
-from Crypto.Hash import SHA256
-
 SALT_SIZE = 16
 PBKDF2_ROUNDS = 600_000
-
-def new_salt() -> bytes:
-    return secrets.token_bytes(SALT_SIZE)
+MAC_KEY_SIZE = 32
 
 def derive_key(password: str, salt: bytes, length: int) -> bytes:
     if not password:
         raise ValueError("Password must not be empty.")
     if len(salt) != SALT_SIZE:
         raise ValueError("Invalid salt size.")
-    return PBKDF2(
-        password, salt, dkLen=length, count=PBKDF2_ROUNDS, hmac_hash_module=SHA256
-    )
+    return PBKDF2(password, salt, dkLen=length, count=PBKDF2_ROUNDS, hmac_hash_module=SHA256)
+
+def derive_keys(password: str, salt: bytes, cipher_key_size: int) -> tuple[bytes, bytes]:
+    material = derive_key(password, salt, cipher_key_size + MAC_KEY_SIZE)
+    return material[:cipher_key_size], material[cipher_key_size:]
 ```
 
-- The 600,000 iterations make brute-forcing the password expensive.
-- A new salt per operation means **the same password yields a different key
-  every time**, so identical plaintexts never produce identical ciphertexts.
-- `derive_key` is told the target length, so one function serves all three
-  algorithms.
+- 600,000 iterations make offline guessing of the password expensive.
+- A new salt per operation means the same password never yields the same key
+  twice, so identical plaintexts never produce identical ciphertexts.
+- The cipher and MAC keys are disjoint slices of one output, so integrity adds
+  **no extra derivation cost** and the two keys are never the same bytes.
+- The key is never stored. A database dump or a stolen disk alone is useless.
 
 ## 2. Algorithm parameters
 
-| Algorithm | Type | Key size | Block / IV | Modes | Padding |
+| Algorithm | Type | Key size | Block / IV | Mode used for stored data | Other modes (benchmark only) |
 | --- | --- | --- | --- | --- | --- |
-| AES | block cipher | 32 bytes (AES-256) | 16 bytes | CBC, CFB, OFB, CTR | PKCS#7 for CBC only |
-| DES | block cipher | 8 bytes | 8 bytes | CBC, CFB, OFB, CTR | PKCS#7 for CBC only |
+| AES | block cipher | 32 bytes (AES-256) | 16 bytes | **CTR** | CBC, CFB-128, OFB |
+| DES | block cipher | 8 bytes (56 effective bits) | 8 bytes | **CTR** | CBC, CFB-64, OFB |
 | RC4 | stream cipher | 32 bytes | none | none | none |
 
 ```python
 SUPPORTED_ALGORITHMS = ("AES", "DES", "RC4")
 SUPPORTED_MODES = ("CBC", "CFB", "OFB", "CTR")
-DEFAULT_MODE = "CBC"
-
-_KEY_SIZE = {"AES": 32, "DES": 8, "RC4": 32}
-_BLOCK_SIZE = {"AES": AES.block_size, "DES": DES.block_size}
-_IV_SIZE = {"AES": AES.block_size, "DES": DES.block_size}
+DEFAULT_MODE = "CTR"
+MODE_FOR = {"AES": "CTR", "DES": "CTR", "RC4": ""}
 ```
 
-## 3. AES
+`encrypt()` uses `MODE_FOR[algorithm]` unless a mode is passed explicitly; the
+API never lets a client pick the mode, so stored data is always CTR (or RC4).
 
-AES is what you should use in practice: `AES` with a 32-byte key is AES-256.
-IV generation and mode selection are shared with DES (see below).
+## 3. Why CTR for both block ciphers
 
-```python
-iv = secrets.token_bytes(_IV_SIZE["AES"])          # 16 random bytes
-key = derive_key(password, salt, _KEY_SIZE["AES"])  # 32 bytes
-cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-ciphertext = cipher.encrypt(pkcs7_pad(data, AES.block_size))
-```
+ECB is excluded because identical plaintext blocks give identical ciphertext,
+which leaks structure (visible in card-scan images). Among the non-ECB modes,
+CTR was chosen because:
 
-## 4. DES
+1. **No padding**: the ciphertext is exactly as long as the plaintext, which
+   matters when every video is stored three times.
+2. **Parallelisable and seekable**: any block can be decrypted on its own, so a
+   video could be streamed from any offset; it was also the fastest AES mode
+   measured (see the report).
+3. **Its weakness is covered**: CTR is malleable (flipping ciphertext bit *i*
+   flips plaintext bit *i*), but the HMAC (section 6) detects any change. There is
+   no padding, so CBC's padding-oracle risk does not arise.
+4. **Same mode for AES and DES**: the comparison between them differs only in
+   the cipher.
 
-DES is implemented **only for comparison**; its 56-bit effective key and 8-byte
-block are broken by modern standards. The code path is identical to AES with a
-smaller key/block:
-
-```python
-iv = secrets.token_bytes(_IV_SIZE["DES"])          # 8 random bytes
-key = derive_key(password, salt, _KEY_SIZE["DES"])  # 8 bytes
-cipher = DES.new(key, DES.MODE_CBC, iv=iv)
-ciphertext = cipher.encrypt(pkcs7_pad(data, DES.block_size))
-```
-
-## 5. RC4
-
-RC4 is a **stream** cipher, so there is no mode of operation, no IV and no
-padding: it XORs the plaintext with a keystream. It is also included only for
-comparison (its keystream has known biases and it is insecure in modern use).
-
-```python
-key = derive_key(password, salt, _KEY_SIZE["RC4"])  # 32 bytes
-ciphertext = ARC4.new(key).encrypt(data)            # no IV, no padding
-```
-
-## 6. Modes of operation
-
-ECB is deliberately avoided: it encrypts identical blocks to identical
-ciphertext, leaking structure. The block ciphers support CBC, CFB, OFB and CTR.
+Every encryption uses a fresh salt, hence a fresh key, so the random starting
+counter can never repeat under the same key, not even with DES's 64-bit block.
 
 ```python
 def _block_cipher(algorithm: str, key: bytes, mode: str, iv: bytes):
     module = AES if algorithm == "AES" else DES
+    bits = _BLOCK_SIZE[algorithm] * 8
     if mode == "CBC":
         return module.new(key, module.MODE_CBC, iv=iv)
     if mode == "CFB":
-        return module.new(key, module.MODE_CFB, iv=iv)
+        # Full-block CFB; PyCryptodome's 8-bit default was measured ~10x slower.
+        return module.new(key, module.MODE_CFB, iv=iv, segment_size=bits)
     if mode == "OFB":
         return module.new(key, module.MODE_OFB, iv=iv)
     if mode == "CTR":
-        bits = _BLOCK_SIZE[algorithm] * 8
         counter = Counter.new(bits, initial_value=int.from_bytes(iv, "big"))
         return module.new(key, module.MODE_CTR, counter=counter)
     raise ValueError(f"Unsupported mode of operation: {mode}")
 ```
 
-| Mode | Needs IV | Needs padding | Turns block cipher into |
-| --- | --- | --- | --- |
-| CBC | yes | yes | block mode |
-| CFB | yes | no | stream |
-| OFB | yes | no | stream |
-| CTR | yes (used as nonce) | no | stream |
-
-CTR has no built-in IV argument in PyCryptodome; the random IV is fed in as the
+PyCryptodome's CTR takes no `iv` argument, so the random IV is used as the
 initial counter value.
 
-## 7. Padding (PKCS#7, CBC only)
+## 4. RC4
 
-CBC requires the plaintext length to be a multiple of the block size. CFB, OFB,
-CTR and a stream cipher like RC4 do not, so padding is applied **only for CBC**.
+RC4 is a **stream** cipher: no mode of operation, no IV, no padding. It is kept
+only because the assignment requires it; its keystream has known biases and it
+is prohibited in TLS (RFC 7465). It is safe to use without a nonce here only
+because every encryption gets a fresh key from a fresh salt.
+
+```python
+ciphertext = ARC4.new(key).encrypt(data)
+```
+
+## 5. Padding (PKCS#7, CBC only)
+
+Only CBC needs the plaintext length to be a multiple of the block size, and CBC
+is used only in the mode benchmark. Stored data (CTR, RC4) is never padded.
 
 ```python
 def _pkcs7_pad(data: bytes, block_size: int) -> bytes:
     padding = block_size - len(data) % block_size
     return data + bytes([padding]) * padding
-
-def _pkcs7_unpad(data: bytes, block_size: int) -> bytes:
-    if not data or len(data) % block_size:
-        raise ValueError("Invalid padding.")
-    padding = data[-1]
-    if padding < 1 or padding > block_size or data[-padding:] != bytes([padding]) * padding:
-        raise ValueError("Invalid padding.")
-    return data[:-padding]
 ```
 
-Note that padding always adds at least one byte, so an input that is already a
-multiple of the block size gets a full extra block.
+## 6. Integrity: encrypt-then-MAC (HMAC-SHA256)
 
-## 8. Unified `encrypt` / `decrypt` API
-
-One entry point per direction covers all three algorithms. It normalises the
-arguments, derives the key, runs the cipher, and returns the parameters needed
-to reverse the operation together with timing measurements.
+None of the three ciphers detects modification, and in CTR and RC4 a wrong key
+does not fail: it silently produces wrong plaintext. For medical records, a
+silently changed allergy or lab value is a clinical risk, so every ciphertext
+gets a 32-byte tag:
 
 ```python
-def encrypt(data, password, algorithm="AES", mode=DEFAULT_MODE) -> EncryptionResult:
-    algorithm, mode = _normalise(algorithm, mode)
+_MAC_VERSION = b"cipher-safe/v1"
+
+def _mac(mac_key, algorithm, mode, salt, iv, ciphertext) -> bytes:
+    header = b"|".join([_MAC_VERSION, algorithm.encode(), (mode or "-").encode()])
+    return hmac.new(mac_key, header + b"|" + salt + (iv or b"") + ciphertext, hashlib.sha256).digest()
+```
+
+- The tag covers **everything decryption depends on**. Binding the algorithm
+  and mode stops a ciphertext being relabelled (for example, CTR read as OFB).
+  The salt and IV have lengths fixed by the algorithm, so the concatenation is
+  unambiguous.
+- `decrypt()` re-derives the MAC key, compares tags with `hmac.compare_digest`
+  (constant time) and only then decrypts. On a mismatch it raises
+  `IntegrityError`, and no plaintext is ever produced.
+- In the API, the password has already been checked against the user's hash, so
+  a tag failure means the **stored data was modified**: the server answers
+  **HTTP 409** instead of returning corrupted data.
+
+## 7. Unified `encrypt` / `decrypt` API
+
+```python
+def encrypt(data, password, algorithm="AES", mode=None) -> EncryptionResult:
+    algorithm, mode = _normalise(algorithm, mode)        # mode defaults to MODE_FOR
     salt = new_salt()
-
-    start = time.perf_counter()
-    key = derive_key(password, salt, _KEY_SIZE[algorithm])
-    key_derivation_ms = (time.perf_counter() - start) * 1000
-
-    start = time.perf_counter()
-    iv = None
+    key, mac_key = derive_keys(password, salt, _KEY_SIZE[algorithm])      # timed: kdf
     if algorithm == "RC4":
-        ciphertext = ARC4.new(key).encrypt(data)
+        ciphertext = ARC4.new(key).encrypt(data)                          # timed: cipher
     else:
         iv = secrets.token_bytes(_IV_SIZE[algorithm])
         cipher = _block_cipher(algorithm, key, mode, iv)
         payload = _pkcs7_pad(data, _BLOCK_SIZE[algorithm]) if mode == "CBC" else data
         ciphertext = cipher.encrypt(payload)
-    cipher_ms = (time.perf_counter() - start) * 1000
+    tag = _mac(mac_key, algorithm, mode, salt, iv, ciphertext)            # timed: mac
+    return EncryptionResult(algorithm, mode, salt, iv, ciphertext, tag, ...)
 
-    return EncryptionResult(algorithm, mode, salt, iv, ciphertext,
-                            len(data), key_derivation_ms, cipher_ms)
+def decrypt(ciphertext, password, algorithm, salt, iv, mode, tag) -> DecryptionResult:
+    # validate sizes -> derive keys -> verify tag (IntegrityError) -> decrypt
 ```
 
-`decrypt` mirrors this: derive the key from the stored salt, rebuild the cipher
-from the stored IV and mode, decrypt, and unpad if CBC.
+Both result objects carry `key_derivation_ms`, `cipher_ms` and `mac_ms`
+separately. PBKDF2 dominates small items, so a single total would hide the
+differences between the ciphers.
 
-The result objects carry the timing split explicitly, because key derivation
-(PBKDF2) dominates the cost and would otherwise hide the differences between the
-ciphers:
+## 8. What is stored per ciphertext
 
-```python
-@dataclass(frozen=True)
-class EncryptionResult:
-    algorithm: str
-    mode: str
-    salt: bytes
-    iv: bytes | None
-    ciphertext: bytes
-    plaintext_size: int
-    key_derivation_ms: float
-    cipher_ms: float
-
-    @property
-    def total_ms(self) -> float:
-        return self.key_derivation_ms + self.cipher_ms
-```
-
-## 9. What must be stored per ciphertext
-
-To decrypt later you need everything except the key: the algorithm, the mode,
-the salt, the IV (block ciphers only) and the ciphertext. In Cipher Safe these
-live on the `EncryptionEnvelope` model, which also keeps the timings:
+Everything except the key, on the abstract `EncryptionEnvelope` model:
 
 | Field | Purpose |
 | --- | --- |
 | `algorithm` | which cipher to use |
-| `mode` | CBC / CFB / OFB / CTR (blank for RC4) |
-| `salt` | 16 bytes, needed to re-derive the key |
-| `iv` | 16 or 8 bytes (null for RC4) |
-| `ciphertext` | the encrypted bytes (or a file blob on disk) |
-| `key_derivation_ms`, `cipher_ms` | timing for the analysis |
+| `mode` | `CTR` for AES/DES, blank for RC4 |
+| `salt` | 16 bytes, needed to re-derive the keys |
+| `iv` | 16 bytes (AES) or 8 bytes (DES), null for RC4 |
+| `tag` | 32-byte HMAC-SHA256 |
+| `ciphertext` | inline bytes (profile) or a blob under `media/` (files) |
+| `key_derivation_ms`, `cipher_ms`, `mac_ms` | timings for the analysis |
 
-## 10. Wiring it into the app: three ciphertexts per item
-
-The service layer encrypts every item with **all three** algorithms and stores
-one row per algorithm:
+## 9. Wiring it into the app: three ciphertexts per item
 
 ```python
-def encrypt_with_all_algorithms(data: bytes, password: str, mode: str = DEFAULT_MODE):
-    return {
-        algorithm: encrypt(data, password, algorithm=algorithm, mode=mode)
-        for algorithm in SUPPORTED_ALGORITHMS
-    }
-
-def store_file_ciphertexts(stored_file, data, password, mode=DEFAULT_MODE):
-    rows = []
-    for algorithm, result in encrypt_with_all_algorithms(data, password, mode).items():
-        row = FileCiphertext(file=stored_file)
-        row.apply_result(result)  # copies algorithm/mode/salt/iv/timings/size
-        row.blob.save(f"{stored_file.pk}-{algorithm}.bin", ContentFile(result.ciphertext), save=False)
-        row.save()
-        rows.append(row)
-    return rows
+def encrypt_with_all_algorithms(data: bytes, password: str):
+    return {a: encrypt(data, password, algorithm=a) for a in SUPPORTED_ALGORITHMS}
 ```
 
-Small personal-data fields use the same helper and store the ciphertext inline;
-large files store it as a blob under `media/`.
+- **Files** (KTP/BPJS scans, medical documents, medical videos): one
+  `FileCiphertext` row per algorithm, with the ciphertext written to disk so
+  large videos do not bloat the database.
+- **Patient profile** (identity and health fields): serialised to **one JSON
+  record** and stored as one `EncryptedValue` per algorithm. A save costs 3
+  PBKDF2 derivations instead of 3 per field, and it also hides which fields are
+  filled in and how long each value is.
 
-## 11. Flow
+## 10. Flow
 
 ```mermaid
 flowchart TD
-    P["User password"] --> K["PBKDF2-HMAC-SHA256<br/>salt, 600k rounds"]
-    S["Random salt (16 B)"] --> K
-    K --> AES["AES-256<br/>CBC/CFB/OFB/CTR"]
-    K --> DES["DES<br/>CBC/CFB/OFB/CTR"]
-    K --> RC4["RC4<br/>stream"]
-
-    AES --> OUT["3 ciphertexts<br/>+ salt + IV per row"]
-    DES --> OUT
-    RC4 --> OUT
-
-    OUT --> DEC1["decrypt with AES"]
-    OUT --> DEC2["decrypt with DES"]
-    OUT --> DEC3["decrypt with RC4"]
+    P["Patient password"] --> K["PBKDF2-HMAC-SHA256<br/>fresh salt, 600k rounds"]
+    K --> CK["cipher key"]
+    K --> MK["MAC key (32 B)"]
+    CK --> AES["AES-256-CTR"]
+    CK --> DES["DES-CTR"]
+    CK --> RC4["RC4"]
+    AES --> T["HMAC-SHA256 tag<br/>over alg, mode, salt, IV, ciphertext"]
+    DES --> T
+    RC4 --> T
+    MK --> T
+    T --> OUT["stored: ciphertext + salt + IV + tag<br/>(x3, one per algorithm)"]
+    OUT --> V{"tag valid?"}
+    V -- yes --> D["decrypt and return"]
+    V -- no --> R["HTTP 409, nothing returned"]
 ```
 
-## 12. Security notes and caveats
+## 11. Security notes and limitations
 
-- **No authentication tag.** These ciphers give confidentiality only; a MAC/AEAD
-  would be needed to detect tampering. Out of scope here, but worth stating.
-- **DES and RC4 are legacy** and are included only to compare against AES.
-- **IV/salt are random per operation**, so re-encrypting the same plaintext
-  yields different ciphertext; never reuse an IV with the same key.
-- **The password travels in the `X-Cipher-Password` header** and is only safe
-  over HTTPS; it is held in memory on the client and never written to disk.
-- **Key derivation dominates the timing.** Benchmark with large inputs to see
-  meaningful cipher-level differences.
+- **DES and RC4 are legacy** and are stored only because the assignment requires
+  it. Each item is only as confidential as its DES copy (56-bit key); a real
+  deployment would keep AES-CTR+HMAC (or AES-GCM) alone.
+- **File names and sizes are stored in the clear** to list records; a revealing
+  file name can leak health data.
+- **No password change or recovery**: keys come from the password, so changing
+  it would mean re-encrypting every item, and a forgotten password makes the
+  vault unrecoverable by design.
+- **The password travels in the `X-Cipher-Password` header**, which is safe only
+  over HTTPS. It is held in memory on the client and never written to disk.
 
-## 13. Verifying the implementation
-
-The primitive-level round trips and the API-level flows are covered by the test
-suite:
+## 12. Verifying the implementation
 
 ```bash
 python manage.py test core
 ```
 
-This checks that every algorithm and mode round-trips, that wrong passwords and
-unknown algorithms are rejected, and that uploaded files download back
-byte-for-byte under each algorithm.
+The suite checks that every algorithm and mode round-trips, that each algorithm
+uses its chosen mode, that a wrong password is rejected for **all three**
+ciphers, that flipping a bit in the ciphertext, IV, salt or tag (or relabelling
+the mode) is detected, that tampered files and profiles return HTTP 409, and
+that uploads download back byte-for-byte under each algorithm.
