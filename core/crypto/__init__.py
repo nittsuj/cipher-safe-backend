@@ -7,20 +7,24 @@ not depend on the module layout; the implementations live in
 algorithm and mode sets in :mod:`core.crypto.constants`.
 """
 
-from .algorithms import DecryptionResult, EncryptionResult, decrypt, encrypt
-from .constants import DEFAULT_MODE, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
-from .keys import PBKDF2_ROUNDS, SALT_SIZE, derive_key, new_salt
+from .algorithms import TAG_SIZE, DecryptionResult, EncryptionResult, IntegrityError, decrypt, encrypt
+from .constants import DEFAULT_MODE, MODE_FOR, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
+from .keys import PBKDF2_ROUNDS, SALT_SIZE, derive_key, derive_keys, new_salt
 
 __all__ = [
     "DEFAULT_MODE",
+    "MODE_FOR",
     "SUPPORTED_ALGORITHMS",
     "SUPPORTED_MODES",
+    "TAG_SIZE",
     "DecryptionResult",
     "EncryptionResult",
+    "IntegrityError",
     "PBKDF2_ROUNDS",
     "SALT_SIZE",
     "decrypt",
     "derive_key",
+    "derive_keys",
     "encrypt",
     "new_salt",
 ]

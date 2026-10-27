@@ -24,10 +24,10 @@ RUNS = 10
 
 # One representative payload per file category in the assignment.
 SIZES = [
-    ("PII field", 64),
-    ("ID card image", 512 * 1024),
-    ("Document", 4 * 1024 * 1024),
-    ("Video", 32 * 1024 * 1024),
+    ("Patient profile record", 512),
+    ("KTP / BPJS card scan", 512 * 1024),
+    ("Lab result PDF", 4 * 1024 * 1024),
+    ("Ultrasound video", 32 * 1024 * 1024),
 ]
 
 
@@ -46,12 +46,13 @@ def summarise(samples: list[float]) -> dict[str, float]:
     }
 
 
-def bench(label: str, size: int, mode: str = "CBC") -> list[dict]:
+def bench(label: str, size: int, mode: str | None = None) -> list[dict]:
+    """Decrypt each algorithm in the mode the application uses (MODE_FOR)."""
     data = payload(size)
     rows = []
     for algorithm in SUPPORTED_ALGORITHMS:
         enc = encrypt(data, PASSWORD, algorithm=algorithm, mode=mode)
-        kdf, cipher = [], []
+        kdf, cipher, mac = [], [], []
         for _ in range(RUNS):
             result = decrypt(
                 enc.ciphertext,
@@ -60,10 +61,12 @@ def bench(label: str, size: int, mode: str = "CBC") -> list[dict]:
                 salt=enc.salt,
                 iv=enc.iv,
                 mode=enc.mode,
+                tag=enc.tag,
             )
             assert result.plaintext == data, f"{algorithm}/{mode} round-trip failed"
             kdf.append(result.key_derivation_ms)
             cipher.append(result.cipher_ms)
+            mac.append(result.mac_ms)
         rows.append(
             {
                 "label": label,
@@ -75,6 +78,7 @@ def bench(label: str, size: int, mode: str = "CBC") -> list[dict]:
                 "runs": RUNS,
                 "kdf_ms": summarise(kdf),
                 "cipher_ms": summarise(cipher),
+                "mac_ms": summarise(mac),
                 "mb_per_s": (size / 1_048_576) / (statistics.fmean(cipher) / 1000)
                 if statistics.fmean(cipher) > 0
                 else None,
@@ -99,6 +103,7 @@ def bench_modes(size: int = 4 * 1024 * 1024) -> list[dict]:
                     salt=enc.salt,
                     iv=enc.iv,
                     mode=mode,
+                    tag=enc.tag,
                 )
                 assert result.plaintext == data, f"{algorithm}/{mode} round-trip failed"
                 samples.append(result.cipher_ms)
