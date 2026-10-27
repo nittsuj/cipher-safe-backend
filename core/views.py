@@ -7,7 +7,7 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils.http import content_disposition_header
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -15,7 +15,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import DEFAULT_MODE, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
+from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
+from .crypto import IntegrityError
 from .models import DownloadEvent, FileCiphertext, PersonalData, StoredFile
 from .serializers import (
     PII_FIELDS,
@@ -29,11 +30,28 @@ from .serializers import (
 )
 from .services import (
     decrypt_file,
+    decrypt_file_label,
+    decrypt_file_labels,
     decrypt_personal_data,
     log_download,
     store_file_ciphertexts,
+    store_file_label,
     store_personal_data,
 )
+
+
+class IntegrityCheckFailed(APIException):
+    """The stored ciphertext failed its HMAC check.
+
+    The password has already been verified against the user's hash by the
+    time this can happen, so a failed tag means the stored data (ciphertext,
+    salt, IV or parameters) was modified. Nothing is returned rather than
+    corrupted plaintext.
+    """
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "Integrity check failed: the stored data has been modified."
+    default_code = "integrity_check_failed"
 
 
 def password_from_request(request) -> str | None:
@@ -146,10 +164,11 @@ class MeView(APIView):
 
 
 class PersonalDataView(APIView):
-    """Read or replace the user's private attributes.
+    """Read or replace the patient profile (identity + medical attributes).
 
     GET decrypts with ``?algorithm=`` (default AES) and requires the password.
-    PUT accepts plaintext fields and re-encrypts them with AES, DES and RC4.
+    PUT accepts the full plaintext profile and re-encrypts it with AES, DES
+    and RC4, replacing the previous profile.
     """
 
     permission_classes = [IsAuthenticated]
@@ -158,7 +177,10 @@ class PersonalDataView(APIView):
         password = require_password(request)
         algorithm = _validate_algorithm(request.query_params.get("algorithm"))
         personal_data = _personal_data_for(request.user)
-        values = decrypt_personal_data(personal_data, password, algorithm)
+        try:
+            values = decrypt_personal_data(personal_data, password, algorithm)
+        except IntegrityError:
+            raise IntegrityCheckFailed()
         return Response(
             {
                 "algorithm": algorithm,
@@ -171,13 +193,18 @@ class PersonalDataView(APIView):
         password = require_password(request)
         serializer = PersonalDataSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        fields = {k: v for k, v in serializer.validated_data.items() if v != ""}
+        fields = {
+            k: (v.isoformat() if hasattr(v, "isoformat") else v)
+            for k, v in serializer.validated_data.items()
+            if v not in ("", None)
+        }
         if not fields:
             raise ValidationError({"detail": "Provide at least one personal-data field."})
         personal_data = _personal_data_for(request.user)
         with transaction.atomic():
             store_personal_data(personal_data, password, fields)
-        values = decrypt_personal_data(personal_data, password, "AES")
+        personal_data.refresh_from_db()
+        values = fields
         return Response(
             {
                 "updated_at": personal_data.updated_at,
@@ -190,36 +217,41 @@ class FileListCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        files = StoredFile.objects.filter(owner=request.user).prefetch_related("ciphertexts")
+        password = require_password(request)
+        files = StoredFile.objects.filter(owner=request.user).prefetch_related("ciphertexts", "labels")
         category = request.query_params.get("category")
         if category:
             files = files.filter(category=category.upper())
-        return Response(StoredFileSerializer(files, many=True).data)
+        files = list(files)
+        try:
+            labels = decrypt_file_labels(files, password)
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        return Response(StoredFileSerializer(files, many=True, context={"labels": labels}).data)
 
     def post(self, request):
         password = require_password(request)
         serializer = FileUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         upload = serializer.validated_data["file"]
-        mode = serializer.validated_data.get("mode") or DEFAULT_MODE
 
         data = upload.read()
         if not data:
             raise ValidationError({"file": "The uploaded file is empty."})
 
+        label = {"name": upload.name, "content_type": getattr(upload, "content_type", "") or ""}
         with transaction.atomic():
             stored_file = StoredFile.objects.create(
                 owner=request.user,
                 category=serializer.validated_data["category"],
-                original_name=upload.name,
-                content_type=getattr(upload, "content_type", "") or "",
                 plaintext_size=len(data),
             )
-            store_file_ciphertexts(stored_file, data, password, mode)
+            store_file_label(stored_file, label["name"], label["content_type"], password)
+            store_file_ciphertexts(stored_file, data, password)
 
         stored_file.refresh_from_db()
         return Response(
-            StoredFileSerializer(stored_file).data,
+            StoredFileSerializer(stored_file, context={"labels": {stored_file.pk: label}}).data,
             status=status.HTTP_201_CREATED,
         )
 
@@ -231,10 +263,20 @@ class FileDetailView(APIView):
         return get_object_or_404(StoredFile, pk=pk, owner=request.user)
 
     def get(self, request, pk: int):
-        return Response(StoredFileSerializer(self._get_file(request, pk)).data)
+        password = require_password(request)
+        stored_file = self._get_file(request, pk)
+        try:
+            labels = {stored_file.pk: decrypt_file_label(stored_file, password)}
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        return Response(StoredFileSerializer(stored_file, context={"labels": labels}).data)
 
     def delete(self, request, pk: int):
         stored_file = self._get_file(request, pk)
+        # Deleting the rows does not remove the blobs from disk; do it explicitly
+        # so a deleted record leaves no ciphertext behind.
+        for ciphertext in stored_file.ciphertexts.all():
+            ciphertext.blob.delete(save=False)
         stored_file.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -253,23 +295,48 @@ class FileDownloadView(APIView):
         )
 
         try:
-            plaintext, kdf_ms, cipher_ms = decrypt_file(ciphertext, password)
-        except ValueError:
-            log_download(stored_file, algorithm, 0.0, 0.0, 0, success=False)
-            raise ValidationError({"detail": "Wrong password or corrupted ciphertext."})
+            # Name and type come from the label copy of the same algorithm.
+            label = decrypt_file_label(stored_file, password, algorithm)
+            result = decrypt_file(ciphertext, password)
+        except IntegrityError:
+            log_download(stored_file, algorithm, 0.0, 0.0, 0.0, 0, success=False)
+            raise IntegrityCheckFailed()
 
-        log_download(stored_file, algorithm, kdf_ms, cipher_ms, len(plaintext))
+        plaintext = result.plaintext
+        kdf_ms = result.key_derivation_ms
+        cipher_ms = result.cipher_ms
+        log_download(stored_file, algorithm, kdf_ms, cipher_ms, result.mac_ms, len(plaintext))
 
         response = HttpResponse(
             plaintext,
-            content_type=stored_file.content_type or "application/octet-stream",
+            content_type=label.get("content_type") or "application/octet-stream",
         )
         response["Content-Disposition"] = content_disposition_header(
-            True, stored_file.original_name
+            True, label.get("name") or f"record-{stored_file.pk}"
         )
         response["Content-Length"] = str(len(plaintext))
         response["X-Cipher-Algorithm"] = algorithm
-        response["X-Cipher-Decrypt-Ms"] = f"{kdf_ms + cipher_ms:.3f}"
+        response["X-Cipher-Decrypt-Ms"] = f"{result.total_ms:.3f}"
+        return response
+
+
+class FileCiphertextView(APIView):
+    """Return one stored copy exactly as it is on disk, without decrypting it.
+
+    Lets the owner see that what the server keeps is ciphertext. It is useless
+    without the password, so only ownership is checked.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int):
+        algorithm = _validate_algorithm(request.query_params.get("algorithm"))
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        ciphertext = get_object_or_404(FileCiphertext, file=stored_file, algorithm=algorithm)
+        response = HttpResponse(ciphertext._payload(), content_type="application/octet-stream")
+        response["Content-Disposition"] = content_disposition_header(
+            True, f"record-{stored_file.pk}-{algorithm}.enc"
+        )
         return response
 
 
@@ -297,8 +364,11 @@ class FileBenchmarkView(APIView):
 
         # Decrypt repeatedly to benchmark the full decrypt path.
         samples = []
-        for _ in range(runs):
-            samples.append(ciphertext.decrypt(password).total_ms)
+        try:
+            for _ in range(runs):
+                samples.append(ciphertext.decrypt(password).total_ms)
+        except IntegrityError:
+            raise IntegrityCheckFailed()
 
         return Response(
             {
@@ -319,21 +389,28 @@ class DownloadHistoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        events = (
+        password = require_password(request)
+        events = list(
             DownloadEvent.objects.filter(owner=request.user)
             .select_related("file")
+            .prefetch_related("file__labels")
             .order_by("-created_at")[:100]
         )
-        return Response(DownloadEventSerializer(events, many=True).data)
+        files = {event.file_id: event.file for event in events}
+        try:
+            labels = decrypt_file_labels(files.values(), password)
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        return Response(DownloadEventSerializer(events, many=True, context={"labels": labels}).data)
 
 
 class TimingAnalysisView(APIView):
-    """Aggregate running times per algorithm for the report."""
+    """Aggregate running times per algorithm (Analysis page)."""
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        total = F("key_derivation_ms") + F("cipher_ms")
+        total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")
         downloads = (
             DownloadEvent.objects.filter(owner=request.user, success=True)
             .annotate(total_ms=total)
@@ -362,7 +439,7 @@ class TimingAnalysisView(APIView):
         return Response(
             {
                 "supported_algorithms": list(SUPPORTED_ALGORITHMS),
-                "supported_modes": list(SUPPORTED_MODES),
+                "modes": MODE_FOR,
                 "downloads": list(downloads),
                 "encryptions": list(encryptions),
             }

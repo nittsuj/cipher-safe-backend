@@ -16,6 +16,7 @@ urlpatterns = [
     path("files/", views.FileListCreateView.as_view(), name="file-list"),
     path("files/<int:pk>/", views.FileDetailView.as_view(), name="file-detail"),
     path("files/<int:pk>/download/", views.FileDownloadView.as_view(), name="file-download"),
+    path("files/<int:pk>/ciphertext/", views.FileCiphertextView.as_view(), name="file-ciphertext"),
     path("files/<int:pk>/benchmark/", views.FileBenchmarkView.as_view(), name="file-benchmark"),
     # Analysis
     path("analysis/downloads/", views.DownloadHistoryView.as_view(), name="download-history"),

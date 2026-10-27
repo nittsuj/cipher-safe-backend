@@ -47,10 +47,10 @@ class AuthenticatedApiTestCase(APITestCase):
             HTTP_X_CIPHER_PASSWORD=password,
         )
 
-    def _upload(self, content: bytes = b"fake document payload " * 200, mode: str = "CBC"):
-        upload = SimpleUploadedFile("report.pdf", content, content_type="application/pdf")
+    def _upload(self, content: bytes = b"fake lab result payload " * 200, category: str = "DOCUMENT"):
+        upload = SimpleUploadedFile("lab-result.pdf", content, content_type="application/pdf")
         response = self.client.post(
-            "/api/files/", {"file": upload, "category": "DOCUMENT", "mode": mode}, format="multipart"
+            "/api/files/", {"file": upload, "category": category}, format="multipart"
         )
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
         return response.json()
