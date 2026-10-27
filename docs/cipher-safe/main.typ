@@ -112,54 +112,75 @@ we encrypt them as well because they link the health data to a real person.
 = Analysis
 
 == What we measured and why
-A patient waits at two moments: *opening* a record at the clinic (one
-decryption) and *uploading* it (three encryptions). We therefore timed
-decryption for one realistic size per data type, splitting each time into key
+A patient waits at two moments: *uploading* a record (the app encrypts it three
+times, once per cipher) and *opening* it at the clinic (one decryption). We timed
+both, for one realistic size per data type, and split each time into key
 derivation (KDF), cipher and MAC. A single total would hide the cipher, because
-key derivation costs the same for every algorithm.
+key derivation does the same work for every algorithm.
 
-== How
-Each case was encrypted once and decrypted 10 times with `time.perf_counter`,
-checking every run returned the original bytes (Intel laptop, Windows 11,
-Python 3.12, PyCryptodome; raw data in `bench_results.json`). One slow first RC4
-call on the 512 B record (29.7 ms) was a warm-up effect, so its minimum is shown.
+== How we made the numbers reliable
+Each case ran one untimed warm-up round, then 15 timed rounds. Every round
+encrypted and decrypted with all three ciphers in a rotating order (AES→DES→RC4,
+then DES→RC4→AES, …), so slow drift on the laptop is shared fairly, and every
+decryption was checked to return the original bytes. We report the *median* with
+the min–max range, because a single slow run pulls the mean but not the median
+(Intel laptop, Windows 11, Python 3.12, PyCryptodome; all samples in
+`bench_results.json`). The KDF gives a built-in noise check: it is identical work
+every time, yet it varied from 117 to 176 ms, so differences smaller than about
+25 ms are noise, not a real effect.
 
 #figure(
-  table(columns: (auto, auto, 1fr, 1fr, 1fr, 1fr, 1fr), align: (left, left, right, right, right, right, right),
-    [Data], [Cipher], [KDF (ms)], [Cipher (ms)], [MAC (ms)], [Total (ms)], [Cipher MB/s],
-    [Profile (512 B)], [AES], [163], [0.11], [0.05], [163], [–],
-    [], [DES], [159], [0.11], [0.04], [159], [–],
-    [], [RC4], [162], [0.04], [0.04], [162], [–],
-    [Lab PDF (4 MiB)], [AES], [171], [2.9], [5.6], [180], [1387],
-    [], [DES], [194], [307], [6.3], [507], [13],
-    [], [RC4], [203], [14.6], [7.2], [225], [274],
-    [Video (32 MiB)], [AES], [197], [35.7], [54.1], [286], [895],
-    [], [DES], [150], [1506], [38.0], [1694], [21],
-    [], [RC4], [128], [99.2], [32.6], [260], [323],
+  table(columns: (auto, auto, 1fr, 1fr, 1fr, 1.6fr, 1fr), align: (left, left, right, right, right, right, right),
+    [Data], [Cipher], [KDF], [Cipher], [MAC], [Open (range)], [Cipher MB/s],
+    [Profile (512 B)], [AES], [139], [0.11], [0.05], [139 (122–176)], [–],
+    [], [DES], [141], [0.13], [0.05], [142 (117–172)], [–],
+    [], [RC4], [143], [0.04], [0.05], [143 (119–175)], [–],
+    [Lab PDF (4 MiB)], [AES], [126], [2.0], [4.0], [134 (124–152)], [1960],
+    [], [DES], [128], [183], [4.1], [317 (284–354)], [22],
+    [], [RC4], [130], [11.8], [4.0], [146 (133–165)], [339],
+    [Video (32 MiB)], [AES], [126], [15.9], [32.1], [176 (162–219)], [2018],
+    [], [DES], [124], [1430], [30.8], [1584 (1465–1648)], [22],
+    [], [RC4], [125], [97.1], [30.6], [254 (239–294)], [329],
   ),
-  caption: [Mean decryption time over 10 runs; AES and DES in CTR mode.],
+  caption: [Time to open (decrypt) one copy, in ms: median of 15 runs, range in brackets. AES and DES use CTR.],
+)
+
+#figure(
+  table(columns: (auto, 1fr, 1fr, 1fr, 1fr), align: (left, right, right, right, right),
+    [Upload (ms)], [AES], [DES], [RC4], [All three],
+    [Profile (512 B)], [150], [148], [149], [448],
+    [KTP scan (512 KiB)], [131], [162], [133], [426],
+    [Lab PDF (4 MiB)], [134], [332], [140], [606],
+    [Video (32 MiB)], [181], [1617], [254], [2051],
+  ),
+  caption: [Time to encrypt one item with each cipher (median of 15 runs). An upload does all three.],
 )
 
 == What the results mean for the patient
-- *AES opens every record in under 0.3 s*; anything smaller than a video takes
-  about 0.17 s, almost all of it PBKDF2. The wait comes from key derivation, which
-  is the cost of never storing keys, not from the cipher.
-- *DES is the only cipher a patient would notice*: 1.7 s for the 32 MiB video
-  versus 0.29 s for AES. It is 40–100× slower, most likely because AES uses the
-  CPU's AES-NI instructions and DES runs in software. With a 56-bit key it is
-  also the weakest of the three.
-- *RC4 is slower than AES* on every real file (274–323 vs 895–1387 MB/s), so it
-  has no speed advantage to offset its known weaknesses.
-- *The integrity check is cheap but not free*: 54 ms on the video, slightly more
-  than AES itself.
-- *Uploading is where the three-cipher rule costs most*: a 32 MiB video takes
-  about 2.6 s to encrypt three times (1.8 s of it DES) and uses 3× the storage.
+- *With AES, every record opens in under 0.2 s*, and almost all of that is the
+  PBKDF2 key derivation. The wait is the cost of never storing keys; the choice of
+  cipher barely changes it. For small items (profile, card scans) the three
+  ciphers are equal within the noise.
+- *DES is the only cipher a patient would notice*: 1.6 s to open the 32 MiB video
+  against 0.18 s with AES. Its throughput (22 MB/s) is about 90 times lower than
+  AES (about 2,000 MB/s), most likely because AES runs on the CPU's AES-NI
+  instructions while DES runs in software. With a 56-bit key it is also the
+  weakest of the three.
+- *RC4 is slower than AES on every real file* (about 330 vs 1,400–2,000 MB/s), so
+  it gives no speed advantage in exchange for its known weaknesses.
+- *The integrity check costs about twice the AES cipher time* on the video (32 vs
+  16 ms), but that is still only 0.03 s of a 0.18 s wait.
+- *Uploading is where the three-cipher rule costs the most*: the video takes
+  about 2.1 s to upload, and 1.6 s of it is DES. Every item also uses three
+  times the storage.
+- *Listing records* decrypts each file's encrypted name, which costs one key
+  derivation (about 0.14 s, the profile row) per file.
 
 #figure(
   table(columns: (auto, 1fr, 1fr, 1fr, 1fr), align: (left, right, right, right, right),
     [MB/s (4 MiB)], [CBC], [CFB], [OFB], [CTR],
-    [AES], [547], [527], [551], [*1708*],
-    [DES], [24], [23], [23], [23],
+    [AES], [611], [565], [544], [*1933*],
+    [DES], [22], [23], [22], [24],
   ),
-  caption: [Throughput per mode. CTR is about 3× faster for AES and no slower for DES, which supports choosing it.],
+  caption: [Cipher throughput per mode (median of 5 runs). CTR is about 3× faster for AES and no slower for DES, which supports choosing it.],
 )
