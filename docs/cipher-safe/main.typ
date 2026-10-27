@@ -184,4 +184,9 @@ smaller than about 25 ms as noise.
   caption: [Cipher throughput per mode (median of 5 runs). CTR is about 3× faster for AES and no slower for DES, which supports choosing it.],
 )
 
+= References
 #image("Images/scenario.png")
+
+= Links
++ https://github.com/nittsuj/cipher-safe-backend
++ https://github.com/nittsuj/cipher-safe-frontend
