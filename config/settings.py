@@ -29,8 +29,7 @@ environ.Env.read_env(BASE_DIR / ".env")
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-# Required with no default: a missing key fails fast instead of silently
-# falling back to a public value that would let anyone forge sessions and tokens.
+# No default, so a missing key stops startup instead of using a known value.
 SECRET_KEY = env("DJANGO_SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -211,12 +210,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 STATIC_URL = 'static/'
 
-# Media files: encrypted ciphertext blobs are written here.
+# Encrypted file blobs are written here. Not served over HTTP (see config/urls.py).
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-
-# Email
-# https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
-
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
