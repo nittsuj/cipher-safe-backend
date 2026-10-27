@@ -64,8 +64,8 @@ gallery or a chat app.
 *Cipher Safe* is a web vault where the patient (the only user role) stores this
 history and opens it at the next appointment. Only the owner, signed in with a
 username and password, can get a record back, and it must come back exactly as
-stored: a silently altered allergy or lab value is a clinical risk, not only a
-privacy one.
+stored. If an allergy or a lab value were changed without anyone noticing, a
+doctor could act on wrong information.
 
 == Which data is private
 Health data is _specific_ personal data under UU PDP No. 27/2022 Art. 4(2) and a
@@ -99,7 +99,7 @@ we encrypt them as well because they link the health data to a real person.
     [Mode (AES, DES)], [CTR for both; RC4 has no mode],
       [ECB leaks image structure in card scans. CTR needs no padding (each of the 3 copies is exactly the file size), is fast, and allows streaming video from any point. Using one mode for both makes the AES-vs-DES comparison about the cipher only. A fresh key per item means the counter never repeats.],
     [Integrity], [HMAC-SHA256 (encrypt-then-MAC) over algorithm, mode, salt, IV, ciphertext],
-      [The ciphers alone cannot detect changes; in CTR and RC4 a flipped bit or wrong key silently gives wrong data. The tag is checked before decryption and a mismatch returns HTTP 409, so data comes back intact or not at all. The MAC key comes from the same PBKDF2 run, so it adds no extra derivation.],
+      [The ciphers alone cannot detect changes; in CTR and RC4 a flipped bit or wrong key silently gives wrong data. The tag is checked before decryption. If it does not match, the API returns HTTP 409 and no data. The MAC key comes from the same PBKDF2 run, so it adds no extra derivation.],
     [Password transport], [Checked against the Django hash; sent in a header; kept in memory on the client],
       [A wrong password is rejected before any crypto runs. A URL would be written to server logs and browser history; memory-only storage keeps it off the patient's disk.],
     [Profile and file names], [Profile: one encrypted JSON record per cipher. File name and type: a separate encrypted label per cipher],
@@ -125,9 +125,9 @@ then DES→RC4→AES, …), so slow drift on the laptop is shared fairly, and ev
 decryption was checked to return the original bytes. We report the *median* with
 the min–max range, because a single slow run pulls the mean but not the median
 (Intel laptop, Windows 11, Python 3.12, PyCryptodome; all samples in
-`bench_results.json`). The KDF gives a built-in noise check: it is identical work
-every time, yet it varied from 117 to 176 ms, so differences smaller than about
-25 ms are noise, not a real effect.
+`bench_results.json`). The KDF also shows how noisy the machine is: it is identical work
+every time, yet it varied from 117 to 176 ms. We therefore treat differences
+smaller than about 25 ms as noise.
 
 #figure(
   table(columns: (auto, auto, 1fr, 1fr, 1fr, 1.6fr, 1fr), align: (left, left, right, right, right, right, right),
@@ -157,24 +157,23 @@ every time, yet it varied from 117 to 176 ms, so differences smaller than about
 )
 
 == What the results mean for the patient
-- *With AES, every record opens in under 0.2 s*, and almost all of that is the
-  PBKDF2 key derivation. The wait is the cost of never storing keys; the choice of
-  cipher barely changes it. For small items (profile, card scans) the three
-  ciphers are equal within the noise.
-- *DES is the only cipher a patient would notice*: 1.6 s to open the 32 MiB video
-  against 0.18 s with AES. Its throughput (22 MB/s) is about 90 times lower than
-  AES (about 2,000 MB/s), most likely because AES runs on the CPU's AES-NI
-  instructions while DES runs in software. With a 56-bit key it is also the
-  weakest of the three.
-- *RC4 is slower than AES on every real file* (about 330 vs 1,400–2,000 MB/s), so
-  it gives no speed advantage in exchange for its known weaknesses.
-- *The integrity check costs about twice the AES cipher time* on the video (32 vs
-  16 ms), but that is still only 0.03 s of a 0.18 s wait.
-- *Uploading is where the three-cipher rule costs the most*: the video takes
-  about 2.1 s to upload, and 1.6 s of it is DES. Every item also uses three
-  times the storage.
-- *Listing records* decrypts each file's encrypted name, which costs one key
-  derivation (about 0.14 s, the profile row) per file.
+- With AES, every record opens in under 0.2 s. Almost all of that time is PBKDF2
+  key derivation, which we accept because keys are never stored. For small items
+  (profile, card scans) the three ciphers take the same time within the noise.
+- DES makes a visible difference only for large files. Opening the 32 MiB video
+  takes 1.6 s with DES and 0.18 s with AES. DES reaches 22 MB/s against about
+  2,000 MB/s for AES, roughly 90 times slower. The likely reason is that AES uses
+  the CPU's AES-NI instructions and DES runs in software. DES also has the
+  shortest key (56 bits).
+- RC4 was slower than AES for every real file (about 330 against 1,400–2,000
+  MB/s), so using it does not save time either.
+- The HMAC check took 32 ms on the video, twice the AES cipher time (16 ms). In
+  total it adds about 0.03 s to opening the video.
+- Uploading the video takes about 2.1 s, of which 1.6 s is the DES copy. Each
+  item also takes three times the storage space, because it is stored once per
+  cipher.
+- Listing records decrypts the name of each file, which takes one key derivation
+  (about 0.14 s, see the profile row) per file.
 
 #figure(
   table(columns: (auto, 1fr, 1fr, 1fr, 1fr), align: (left, right, right, right, right),
@@ -184,3 +183,5 @@ every time, yet it varied from 117 to 176 ms, so differences smaller than about
   ),
   caption: [Cipher throughput per mode (median of 5 runs). CTR is about 3× faster for AES and no slower for DES, which supports choosing it.],
 )
+
+#image("Images/scenario.png")
