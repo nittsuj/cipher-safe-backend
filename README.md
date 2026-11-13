@@ -181,25 +181,76 @@ revoked, count how often they were opened, and the open endpoint is throttled.
 
 ## Setup
 
-Requires Python 3.12+ and a PostgreSQL instance (`docker-compose up -d db`).
+### 1. Create `.env` and generate its secrets
 
 ```bash
-# with uv (recommended)
-uv sync
+cp .env.example .env
+```
 
-# or a plain venv
-python -m venv .venv && . .venv/bin/activate && pip install -e .
+Two values must be generated, and each person uses their own:
 
-cp .env.example .env      # fill in the Postgres values + DJANGO_SECRET_KEY
-python manage.py migrate
-python manage.py createsuperuser
-python manage.py runserver
+| Variable | What it is | Generate with |
+| --- | --- | --- |
+| `DJANGO_SECRET_KEY` | Signs login tokens (JWT) and sessions | see below |
+| `POSTGRES_PASSWORD` | Password of the local database | see below |
+
+```bash
+# With Python installed
+python3 -c "import secrets; print(secrets.token_urlsafe(50))"   # DJANGO_SECRET_KEY
+python3 -c "import secrets; print(secrets.token_urlsafe(24))"   # POSTGRES_PASSWORD
+
+# With only Docker installed
+docker run --rm python:3.12-slim python -c "import secrets; print(secrets.token_urlsafe(50))"
+docker run --rm python:3.12-slim python -c "import secrets; print(secrets.token_urlsafe(24))"
+```
+
+Paste each output into `.env`. Notes:
+
+- **Set `POSTGRES_PASSWORD` before the first `docker compose up`.** Postgres
+  stores it when the database is first created; changing it later needs
+  `docker compose down -v`, which deletes the data.
+- **Keep `DJANGO_SECRET_KEY` stable.** Changing it logs everyone out. It does not
+  encrypt the records: those are encrypted with each user's own password.
+- Never commit `.env` (it is gitignored).
+
+### 2a. Run with Docker (recommended)
+
+Needs only Docker. Python, its locked dependencies and PostgreSQL all run in
+containers.
+
+```bash
+docker compose up --build
+```
+
+The API is at <http://localhost:8000/api/>. Migrations run automatically on
+start, and code changes reload the server. Then start the frontend (see the
+`cipher-safe-frontend` README).
+
+```bash
+docker compose exec api python manage.py createsuperuser   # admin account (/admin/)
+docker compose exec api python manage.py test core         # run the tests
+docker compose down          # stop (data is kept in the postgres_data volume)
+docker compose down -v       # stop and delete all data
+```
+
+If port 5432 or 8000 is taken, set `POSTGRES_PORT` or `API_PORT` in `.env`.
+
+### 2b. Run without Docker
+
+Needs Python 3.12+, [uv](https://docs.astral.sh/uv/) and a PostgreSQL server
+(for example `docker compose up -d db`).
+
+```bash
+uv sync                   # creates .venv from uv.lock
+uv run python manage.py migrate
+uv run python manage.py createsuperuser
+uv run python manage.py runserver
 ```
 
 Run the tests:
 
 ```bash
-python manage.py test core
+uv run python manage.py test core
 ```
 
 ## API
