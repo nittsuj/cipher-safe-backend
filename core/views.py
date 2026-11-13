@@ -7,6 +7,7 @@ from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
@@ -17,12 +18,15 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_PATIENT, SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
-from .models import DownloadEvent, FileCiphertext, PersonalData, StoredFile
+from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
 from .serializers import (
     PII_FIELDS,
     DownloadEventSerializer,
+    FileShareSerializer,
+    ReceivedShareSerializer,
+    ShareCreateSerializer,
     FileUploadSerializer,
     LoginSerializer,
     PersonalDataSerializer,
@@ -31,7 +35,10 @@ from .serializers import (
     UserSerializer,
 )
 from .services import (
+    create_share,
     decrypt_file,
+    delete_share,
+    open_share,
     decrypt_file_label,
     decrypt_file_labels,
     decrypt_personal_data,
@@ -63,6 +70,13 @@ class IsPatient(BasePermission):
 
     def has_permission(self, request, view):
         return bool(request.user and request.user.is_authenticated and request.user.role == ROLE_PATIENT)
+
+
+class IsDoctor(BasePermission):
+    message = "Only doctor accounts receive shared records."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role == ROLE_DOCTOR)
 
 
 PATIENT_ONLY = [IsAuthenticated, IsPatient]
@@ -313,6 +327,8 @@ class FileDetailView(APIView):
         # so a deleted record leaves no ciphertext behind.
         for ciphertext in stored_file.ciphertexts.all():
             ciphertext.blob.delete(save=False)
+        for share in stored_file.shares.all():
+            share.blob.delete(save=False)
         stored_file.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -494,3 +510,89 @@ class TimingAnalysisView(APIView):
                 "encryptions": list(encryptions),
             }
         )
+
+
+class FileShareListCreateView(APIView):
+    """List a record's shares, or share it with a doctor.
+
+    POST re-encrypts the record under a fresh share key and returns that key
+    **once**; the patient sends it to the doctor themselves.
+    """
+
+    permission_classes = PATIENT_ONLY
+
+    def get(self, request, pk: int):
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        shares = stored_file.shares.select_related("doctor")
+        return Response(FileShareSerializer(shares, many=True).data)
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        serializer = ShareCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                share, key = create_share(
+                    stored_file,
+                    serializer.validated_data["doctor"],
+                    password,
+                    serializer.validated_data["expires_hours"],
+                )
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        return Response(
+            {**FileShareSerializer(share).data, "share_key": key},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class FileShareRevokeView(APIView):
+    permission_classes = PATIENT_ONLY
+
+    def delete(self, request, pk: int):
+        share = get_object_or_404(FileShare, pk=pk, file__owner=request.user)
+        delete_share(share)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ReceivedShareListView(APIView):
+    """Records shared with the signed-in doctor that have not expired."""
+
+    permission_classes = [IsAuthenticated, IsDoctor]
+
+    def get(self, request):
+        shares = FileShare.objects.filter(doctor=request.user, expires_at__gt=timezone.now()).select_related(
+            "file", "file__owner"
+        )
+        return Response(ReceivedShareSerializer(shares, many=True).data)
+
+
+class ReceivedShareOpenView(APIView):
+    """Decrypt a shared record with the share key (``X-Share-Key`` header).
+
+    The key is never stored, so the server cannot open the share without it.
+    Throttled because the key is the only secret.
+    """
+
+    permission_classes = [IsAuthenticated, IsDoctor]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "share"
+
+    def get(self, request, pk: int):
+        key = request.headers.get("X-Share-Key", "")
+        if not key:
+            raise ValidationError({"share_key": "Enter the share key the patient sent you."})
+        share = get_object_or_404(FileShare, pk=pk, doctor=request.user, expires_at__gt=timezone.now())
+        try:
+            label, data = open_share(share, key)
+        except IntegrityError:
+            raise PermissionDenied("Wrong share key.")
+        response = file_response(
+            data,
+            label.get("content_type", ""),
+            label.get("name") or f"shared-record-{share.pk}",
+            inline=_wants_inline(request),
+        )
+        response["X-Content-Type"] = label.get("content_type", "")
+        return response
