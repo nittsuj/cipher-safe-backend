@@ -252,7 +252,7 @@ curl -o ultrasound.mp4 localhost:8000/api/files/1/download/?algorithm=RC4 \
 
 ## Layout
 
-```
+```text
 config/            Django project (settings, urls)
 core/
   constants.py     algorithm/mode choices derived from the crypto layer
