@@ -213,5 +213,5 @@ def open_share(share: FileShare, key: str) -> tuple[dict[str, str], bytes]:
 
 
 def delete_share(share: FileShare) -> None:
-    share.blob.delete(save=False)
+    # The blob is removed from disk by the post_delete handler in core.signals.
     share.delete()

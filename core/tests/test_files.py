@@ -7,7 +7,7 @@ from rest_framework import status
 from django.core.files.uploadedfile import SimpleUploadedFile
 
 from ..crypto import MODE_FOR, SUPPORTED_ALGORITHMS
-from ..models import FileCiphertext, FileLabel, StoredFile
+from ..models import FileCiphertext, FileLabel, StoredFile, User
 
 from .base import PASSWORD, AuthenticatedApiTestCase
 
@@ -85,9 +85,26 @@ class FileApiTests(AuthenticatedApiTestCase):
         body = self._upload()
         paths = [row.blob.path for row in FileCiphertext.objects.filter(file_id=body["id"])]
         self.assertTrue(all(os.path.exists(path) for path in paths))
-        response = self.client.delete(f"/api/files/{body['id']}/")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.delete(f"/api/files/{body['id']}/")
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(any(os.path.exists(path) for path in paths))
+
+    def test_deleting_the_account_removes_its_blobs(self):
+        body = self._upload()
+        paths = [row.blob.path for row in FileCiphertext.objects.filter(file_id=body["id"])]
+        with self.captureOnCommitCallbacks(execute=True):
+            User.objects.get(username="alice").delete()
+        self.assertFalse(any(os.path.exists(path) for path in paths))
+
+    def test_rolled_back_delete_keeps_the_blobs(self):
+        body = self._upload()
+        paths = [row.blob.path for row in FileCiphertext.objects.filter(file_id=body["id"])]
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            StoredFile.objects.get(pk=body["id"]).delete()
+        # Nothing is removed until the transaction commits.
+        self.assertTrue(all(os.path.exists(path) for path in paths))
+        self.assertEqual(len(callbacks), len(paths))
 
     def test_old_upload_mode_field_is_ignored(self):
         upload = SimpleUploadedFile("scan.png", b"png bytes", content_type="image/png")

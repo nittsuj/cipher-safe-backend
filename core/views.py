@@ -322,14 +322,9 @@ class FileDetailView(APIView):
         return Response(StoredFileSerializer(stored_file, context={"labels": labels}).data)
 
     def delete(self, request, pk: int):
-        stored_file = self._get_file(request, pk)
-        # Deleting the rows does not remove the blobs from disk; do it explicitly
-        # so a deleted record leaves no ciphertext behind.
-        for ciphertext in stored_file.ciphertexts.all():
-            ciphertext.blob.delete(save=False)
-        for share in stored_file.shares.all():
-            share.blob.delete(save=False)
-        stored_file.delete()
+        # The ciphertext and share blobs are removed from disk by the
+        # post_delete handlers in core.signals.
+        self._get_file(request, pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

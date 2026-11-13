@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 
 from django.core.cache import cache
@@ -111,7 +112,6 @@ class SharingTests(AuthenticatedApiTestCase):
     def test_deleting_the_record_removes_share_blobs(self):
         self._share()
         path = FileShare.objects.get().blob.path
-        self.client.delete(f"/api/files/{self.file['id']}/")
-        import os
-
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.delete(f"/api/files/{self.file['id']}/")
         self.assertFalse(os.path.exists(path))
