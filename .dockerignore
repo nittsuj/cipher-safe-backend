@@ -1,0 +1,12 @@
+.venv/
+.env
+.env.*
+!.env.example
+media/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.git/
+docs/**/*.pdf
