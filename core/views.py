@@ -395,9 +395,14 @@ class FileBenchmarkView(APIView):
 
         # Decrypt repeatedly to benchmark the full decrypt path.
         samples = []
+        # Cipher + integrity check only. Key setup (PBKDF2) costs the same for
+        # every algorithm and would hide the difference between them.
+        cipher_samples = []
         try:
             for _ in range(runs):
-                samples.append(ciphertext.decrypt(password).total_ms)
+                result = ciphertext.decrypt(password)
+                samples.append(result.total_ms)
+                cipher_samples.append(result.cipher_ms + result.mac_ms)
         except IntegrityError:
             raise IntegrityCheckFailed()
 
@@ -412,6 +417,8 @@ class FileBenchmarkView(APIView):
                 "min_ms": min(samples),
                 "max_ms": max(samples),
                 "mean_ms": sum(samples) / len(samples),
+                "cipher_samples_ms": cipher_samples,
+                "cipher_mean_ms": sum(cipher_samples) / len(cipher_samples),
             }
         )
 
