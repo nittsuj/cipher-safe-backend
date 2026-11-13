@@ -211,7 +211,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | POST | `/api/files/` | Upload (`file`, `category`); encrypts with all algorithms |
 | GET | `/api/files/{id}/` | File metadata + per-algorithm ciphertext info |
 | DELETE | `/api/files/{id}/` | Delete a file |
-| GET | `/api/files/{id}/download/?algorithm=DES` | Decrypt and download |
+| GET | `/api/files/{id}/download/?algorithm=DES&inline=1` | Decrypt and download; `inline=1` serves safe types (PDF, images, video, text) for in-browser preview |
 | GET | `/api/files/{id}/ciphertext/?algorithm=DES` | Download the stored copy as-is (ciphertext), keeping the original extension (`lab.DES-encrypted.pdf`); needs the password |
 | GET | `/api/files/{id}/benchmark/?algorithm=AES&runs=10` | N timed decryptions (total and cipher-only samples) |
 | GET | `/api/analysis/downloads/` | Download history with timings |
