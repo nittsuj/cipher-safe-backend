@@ -345,20 +345,29 @@ class FileDownloadView(APIView):
 class FileCiphertextView(APIView):
     """Return one stored copy exactly as it is on disk, without decrypting it.
 
-    Lets the owner see that what the server keeps is ciphertext. It is useless
-    without the password, so only ownership is checked.
+    Lets the owner see that what the server keeps is ciphertext. The file keeps
+    its original extension (``lab-result.AES-encrypted.pdf``), so it is plain
+    that the same PDF no longer opens. The password is needed to decrypt the
+    name for that.
     """
 
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk: int):
+        password = require_password(request)
         algorithm = _validate_algorithm(request.query_params.get("algorithm"))
         stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
         ciphertext = get_object_or_404(FileCiphertext, file=stored_file, algorithm=algorithm)
+        try:
+            name = decrypt_file_label(stored_file, password).get("name") or f"record-{stored_file.pk}"
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        stem, ext = os.path.splitext(name)
         response = HttpResponse(ciphertext._payload(), content_type="application/octet-stream")
         response["Content-Disposition"] = content_disposition_header(
-            True, f"record-{stored_file.pk}-{algorithm}.enc"
+            True, f"{stem}.{algorithm}-encrypted{ext}"
         )
+        response["Cache-Control"] = "no-store"
         return response
 
 

@@ -19,3 +19,8 @@ class PreviewTests(AuthenticatedApiTestCase):
         response = self.client.get(f"/api/files/{body['id']}/download/?algorithm=AES&inline=1")
         self.assertTrue(response["Content-Disposition"].startswith("attachment"))
         self.assertEqual(response["Content-Type"], "application/octet-stream")
+
+    def test_ciphertext_download_keeps_the_extension(self):
+        body = self._upload()
+        response = self.client.get(f"/api/files/{body['id']}/ciphertext/?algorithm=DES")
+        self.assertIn('filename="lab-result.DES-encrypted.pdf"', response["Content-Disposition"])
