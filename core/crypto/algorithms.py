@@ -1,9 +1,9 @@
 """Cipher implementations for AES, DES and RC4, with encrypt-then-MAC.
 
 * ``AES`` / ``DES`` are block ciphers and support the non-ECB modes of
-  operation CBC, CFB, OFB and CTR. Stored data uses CTR for both
-  (:data:`~core.crypto.constants.MODE_FOR`); the other modes exist for the
-  mode comparison in the benchmark.
+  operation CBC, CFB, OFB and CTR; AES also supports GCM. Stored data uses
+  AES-GCM and DES-CTR (:data:`~core.crypto.constants.MODE_FOR`); the other
+  modes exist for the mode comparison in the benchmark.
 * ``RC4`` is a stream cipher, so a mode of operation does not apply.
 
 Only CBC requires PKCS#7 padding; CFB, OFB and CTR turn the block cipher into
@@ -11,11 +11,15 @@ a stream cipher and operate on the plaintext length directly. CFB is run with
 full-block segments (CFB-128 for AES, CFB-64 for DES) instead of
 PyCryptodome's 8-bit default, which was measured to be ~10x slower.
 
-None of the three ciphers detects modification of the ciphertext, and in
-CTR/OFB/CFB/RC4 a wrong key just yields garbage. Every ciphertext therefore
-carries an HMAC-SHA256 tag over its parameters and bytes (encrypt-then-MAC),
-and :func:`decrypt` verifies the tag *before* decrypting. That is what lets the
-application guarantee the data comes back intact.
+CBC/CFB/OFB/CTR and RC4 do not detect modification of the ciphertext, and a
+wrong key just yields garbage. Those ciphertexts therefore carry an HMAC-SHA256
+tag over their parameters and bytes (encrypt-then-MAC), and :func:`decrypt`
+verifies the tag *before* decrypting.
+
+GCM is an AEAD mode: it produces its own 128-bit authentication tag, so no
+HMAC is computed. The algorithm, mode and salt are bound in as associated data
+instead, which gives the same guarantee: the data comes back intact or not at
+all.
 
 Adapted from https://github.com/ukassu/lab-session-information-security
 (``crypto_tool.py``); the key sizes and the CBC / PKCS#7 paths follow that
@@ -34,7 +38,7 @@ from typing import Final
 from Crypto.Cipher import AES, ARC4, DES
 from Crypto.Util import Counter
 
-from .constants import MODE_FOR, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
+from .constants import AEAD_MODES, BLOCK128_ONLY_MODES, MODE_FOR, SUPPORTED_ALGORITHMS, SUPPORTED_MODES
 from .keys import SALT_SIZE, derive_keys, new_salt
 
 #: Key length in bytes per algorithm (AES-256 / DES-64 / RC4-256).
@@ -43,8 +47,14 @@ _KEY_SIZE: Final = {"AES": 32, "DES": 8, "RC4": 32}
 _BLOCK_SIZE: Final = {"AES": AES.block_size, "DES": DES.block_size}
 _IV_SIZE: Final = {"AES": AES.block_size, "DES": DES.block_size}
 
-#: Length of the HMAC-SHA256 tag stored with every ciphertext.
+#: GCM uses the recommended 96-bit nonce.
+GCM_NONCE_SIZE: Final = 12
+
+#: Length of the HMAC-SHA256 tag stored with non-AEAD ciphertexts.
 TAG_SIZE: Final = 32
+
+#: Length of the GCM authentication tag.
+GCM_TAG_SIZE: Final = 16
 
 #: Format version bound into the MAC, so a future format cannot be confused
 #: with this one.
@@ -99,7 +109,23 @@ def _normalise(algorithm: str, mode: str | None) -> tuple[str, str]:
     mode = (mode or MODE_FOR[algorithm]).upper()
     if mode not in SUPPORTED_MODES:
         raise ValueError(f"Unsupported mode of operation: {mode}")
+    if mode in BLOCK128_ONLY_MODES and _BLOCK_SIZE[algorithm] != 16:
+        raise ValueError(f"{mode} requires a 128-bit block cipher; {algorithm} is not one.")
     return algorithm, mode
+
+
+def _iv_size(algorithm: str, mode: str) -> int:
+    return GCM_NONCE_SIZE if mode == "GCM" else _IV_SIZE[algorithm]
+
+
+def _tag_size(mode: str) -> int:
+    return GCM_TAG_SIZE if mode in AEAD_MODES else TAG_SIZE
+
+
+def _aad(algorithm: str, mode: str, salt: bytes) -> bytes:
+    """Associated data for AEAD modes: binds the parameters to the tag."""
+
+    return b"|".join([_MAC_VERSION, algorithm.encode(), mode.encode()]) + b"|" + salt
 
 
 def _pkcs7_pad(data: bytes, block_size: int) -> bytes:
@@ -128,6 +154,8 @@ def _block_cipher(algorithm: str, key: bytes, mode: str, iv: bytes):
     if mode == "CTR":
         counter = Counter.new(bits, initial_value=int.from_bytes(iv, "big"))
         return module.new(key, module.MODE_CTR, counter=counter)
+    if mode == "GCM":
+        return AES.new(key, AES.MODE_GCM, nonce=iv, mac_len=GCM_TAG_SIZE)
     raise ValueError(f"Unsupported mode of operation: {mode}")
 
 
@@ -164,18 +192,26 @@ def encrypt(
 
     start = time.perf_counter()
     iv: bytes | None = None
+    tag: bytes | None = None
     if algorithm == "RC4":
         ciphertext = ARC4.new(key).encrypt(data)
     else:
-        iv = secrets.token_bytes(_IV_SIZE[algorithm])
+        iv = secrets.token_bytes(_iv_size(algorithm, mode))
         cipher = _block_cipher(algorithm, key, mode, iv)
-        payload = _pkcs7_pad(data, _BLOCK_SIZE[algorithm]) if mode == "CBC" else data
-        ciphertext = cipher.encrypt(payload)
+        if mode in AEAD_MODES:
+            # GCM authenticates as it encrypts; its tag replaces the HMAC.
+            cipher.update(_aad(algorithm, mode, salt))
+            ciphertext, tag = cipher.encrypt_and_digest(data)
+        else:
+            payload = _pkcs7_pad(data, _BLOCK_SIZE[algorithm]) if mode == "CBC" else data
+            ciphertext = cipher.encrypt(payload)
     cipher_ms = (time.perf_counter() - start) * 1000
 
-    start = time.perf_counter()
-    tag = _mac(mac_key, algorithm, mode, salt, iv, ciphertext)
-    mac_ms = (time.perf_counter() - start) * 1000
+    mac_ms = 0.0
+    if tag is None:
+        start = time.perf_counter()
+        tag = _mac(mac_key, algorithm, mode, salt, iv, ciphertext)
+        mac_ms = (time.perf_counter() - start) * 1000
 
     return EncryptionResult(
         algorithm=algorithm,
@@ -204,20 +240,37 @@ def decrypt(
 
     Raises :class:`IntegrityError` if the tag does not match, which covers a
     wrong password as well as any modified byte of ciphertext, salt, IV,
-    algorithm or mode.
+    algorithm or mode. For GCM the tag is checked by the cipher itself; for
+    every other mode the HMAC is checked first.
     """
 
     algorithm, mode = _normalise(algorithm, mode)
     if len(salt) != SALT_SIZE:
         raise IntegrityError("Invalid salt size.")
-    if algorithm != "RC4" and (not iv or len(iv) != _IV_SIZE[algorithm]):
+    if algorithm != "RC4" and (not iv or len(iv) != _iv_size(algorithm, mode)):
         raise IntegrityError("Missing or invalid IV for block cipher.")
-    if not tag or len(tag) != TAG_SIZE:
+    if not tag or len(tag) != _tag_size(mode):
         raise IntegrityError("Missing or invalid integrity tag.")
 
     start = time.perf_counter()
     key, mac_key = derive_keys(password, salt, _KEY_SIZE[algorithm])
     key_derivation_ms = (time.perf_counter() - start) * 1000
+
+    if mode in AEAD_MODES:
+        start = time.perf_counter()
+        cipher = _block_cipher(algorithm, key, mode, iv)
+        cipher.update(_aad(algorithm, mode, salt))
+        try:
+            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        except ValueError as exc:
+            raise IntegrityError("Wrong password or tampered ciphertext.") from exc
+        cipher_ms = (time.perf_counter() - start) * 1000
+        return DecryptionResult(
+            plaintext=plaintext,
+            key_derivation_ms=key_derivation_ms,
+            cipher_ms=cipher_ms,
+            mac_ms=0.0,
+        )
 
     start = time.perf_counter()
     expected = _mac(mac_key, algorithm, mode, salt, iv, ciphertext)

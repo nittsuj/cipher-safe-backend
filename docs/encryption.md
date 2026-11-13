@@ -76,21 +76,47 @@ def derive_keys(password: str, salt: bytes, cipher_key_size: int) -> tuple[bytes
 
 | Algorithm | Type | Key size | Block / IV | Mode used for stored data | Other modes (benchmark only) |
 | --- | --- | --- | --- | --- | --- |
-| AES | block cipher | 32 bytes (AES-256) | 16 bytes | **CTR** | CBC, CFB-128, OFB |
+| AES | block cipher | 32 bytes (AES-256) | 16 bytes (GCM: 12-byte nonce) | **GCM** | CBC, CFB-128, OFB, CTR |
 | DES | block cipher | 8 bytes (56 effective bits) | 8 bytes | **CTR** | CBC, CFB-64, OFB |
 | RC4 | stream cipher | 32 bytes | none | none | none |
 
 ```python
 SUPPORTED_ALGORITHMS = ("AES", "DES", "RC4")
-SUPPORTED_MODES = ("CBC", "CFB", "OFB", "CTR")
+SUPPORTED_MODES = ("CBC", "CFB", "OFB", "CTR", "GCM")
+AEAD_MODES = ("GCM",)
 DEFAULT_MODE = "CTR"
-MODE_FOR = {"AES": "CTR", "DES": "CTR", "RC4": ""}
+MODE_FOR = {"AES": "GCM", "DES": "CTR", "RC4": ""}
 ```
 
 `encrypt()` uses `MODE_FOR[algorithm]` unless a mode is passed explicitly; the
-API never lets a client pick the mode, so stored data is always CTR (or RC4).
+API never lets a client pick the mode, so stored data is AES-GCM, DES-CTR or
+RC4. Rows written before the switch to GCM keep `mode = "CTR"` and still
+decrypt, because every row records its own mode.
 
-## 3. Why CTR for both block ciphers
+### AES-GCM
+
+AES uses **GCM**, an AEAD mode: it encrypts in CTR fashion and computes a
+128-bit authentication tag (GHASH) in the same pass. The tag replaces the
+HMAC for AES, so `mac_ms` is 0 and the integrity cost is part of `cipher_ms`.
+The version, algorithm, mode and salt are passed as **associated data**, so
+relabelling a ciphertext or swapping its salt fails the tag just as with the
+HMAC. The nonce is 12 random bytes; every encryption also has a fresh salt and
+therefore a fresh key, so a nonce can never repeat under the same key.
+
+GCM is defined only for 128-bit block ciphers, so DES (64-bit block) cannot
+use it and keeps CTR + HMAC.
+
+```python
+if mode in AEAD_MODES:
+    cipher = AES.new(key, AES.MODE_GCM, nonce=iv, mac_len=16)
+    cipher.update(_aad(algorithm, mode, salt))
+    ciphertext, tag = cipher.encrypt_and_digest(data)
+...
+cipher.update(_aad(algorithm, mode, salt))
+plaintext = cipher.decrypt_and_verify(ciphertext, tag)  # ValueError -> IntegrityError
+```
+
+## 3. Why CTR for DES (and the GCM keystream for AES)
 
 ECB is excluded because identical plaintext blocks give identical ciphertext,
 which leaks structure (visible in card-scan images). Among the non-ECB modes,
@@ -104,8 +130,9 @@ CTR was chosen because:
 3. **Its weakness is covered**: CTR is malleable (flipping ciphertext bit *i*
    flips plaintext bit *i*), but the HMAC (section 6) detects any change. There is
    no padding, so CBC's padding-oracle risk does not arise.
-4. **Same mode for AES and DES**: the comparison between them differs only in
-   the cipher.
+4. **Same keystream construction**: GCM encrypts with CTR internally, so AES
+   and DES still use the same counter-mode encryption; AES only adds GHASH
+   authentication on top.
 
 Every encryption uses a fresh salt, hence a fresh key, so the random starting
 counter can never repeat under the same key, not even with DES's 64-bit block.
@@ -239,13 +266,13 @@ flowchart TD
     P["Patient password"] --> K["PBKDF2-HMAC-SHA256<br/>fresh salt, 600k rounds"]
     K --> CK["cipher key"]
     K --> MK["MAC key (32 B)"]
-    CK --> AES["AES-256-CTR"]
+    CK --> AES["AES-256-GCM<br/>(own 128-bit tag)"]
     CK --> DES["DES-CTR"]
     CK --> RC4["RC4"]
-    AES --> T["HMAC-SHA256 tag<br/>over alg, mode, salt, IV, ciphertext"]
-    DES --> T
+    DES --> T["HMAC-SHA256 tag<br/>over alg, mode, salt, IV, ciphertext"]
     RC4 --> T
     MK --> T
+    AES --> OUT
     T --> OUT["stored: ciphertext + salt + IV + tag<br/>(x3, one per algorithm)"]
     OUT --> V{"tag valid?"}
     V -- yes --> D["decrypt and return"]
@@ -256,7 +283,7 @@ flowchart TD
 
 - **DES and RC4 are legacy** and are stored only because the assignment requires
   it. Each item is only as confidential as its DES copy (56-bit key); a real
-  deployment would keep AES-CTR+HMAC (or AES-GCM) alone.
+  deployment would keep AES-GCM alone.
 - **File names and sizes are stored in the clear** to list records; a revealing
   file name can leak health data.
 - **No password change or recovery**: keys come from the password, so changing
