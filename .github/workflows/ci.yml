@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: cipher_safe
+          POSTGRES_USER: cipher_safe
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cipher_safe -d cipher_safe"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+
+    env:
+      # Throwaway values for the test run only; real ones live in each .env.
+      DJANGO_SECRET_KEY: ci-only-not-secret
+      POSTGRES_DB: cipher_safe
+      POSTGRES_USER: cipher_safe
+      POSTGRES_PASSWORD: ci-only-password
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: 5432
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --frozen
+
+      - name: Lint (pyflakes rules)
+        run: uvx ruff@0.17 check --select F .
+
+      - name: Check for missing migrations
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: Run tests
+        run: uv run python manage.py test core
