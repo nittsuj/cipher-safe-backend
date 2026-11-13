@@ -125,6 +125,8 @@ class FileApiTests(AuthenticatedApiTestCase):
         benchmark = self.client.get(f"/api/files/{body['id']}/benchmark/?algorithm=DES&runs=3")
         self.assertEqual(benchmark.status_code, status.HTTP_200_OK)
         self.assertEqual(benchmark.json()["runs"], 3)
+        self.assertEqual(len(benchmark.json()["cipher_samples_ms"]), 3)
+        self.assertLess(benchmark.json()["cipher_mean_ms"], benchmark.json()["mean_ms"])
 
         timings = self.client.get("/api/analysis/timings/")
         self.assertEqual(timings.status_code, status.HTTP_200_OK)
