@@ -1,4 +1,27 @@
+# Python
 .venv
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / local env
 .env
+.env.*
+!.env.example
+
+# User data (encrypted blobs) and generated files
 media/
+staticfiles/
+db.sqlite3
+
+# Typst build output
+docs/**/*.pdf
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
