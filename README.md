@@ -219,8 +219,12 @@ Needs only Docker. Python, its locked dependencies and PostgreSQL all run in
 containers.
 
 ```bash
-docker compose up --build
+docker compose pull         # download the API image CI built from main
+docker compose up
 ```
+
+Changed the backend code or its dependencies? Build your own image instead:
+`docker compose up --build`.
 
 The API is at <http://localhost:8000/api/>. Migrations run automatically on
 start, and code changes reload the server. Then start the frontend (see the

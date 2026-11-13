@@ -17,6 +17,8 @@ services:
       retries: 30
 
   api:
+    # Prebuilt by CI on every merge to main; `docker compose up --build` builds it locally instead.
+    image: ghcr.io/nittsuj/cipher-safe-backend:latest
     build: .
     restart: unless-stopped
     env_file: .env
