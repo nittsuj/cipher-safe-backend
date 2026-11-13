@@ -20,7 +20,6 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
-from .exceptions import IntegrityCheckFailed
 from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
 from .serializers import (
     PII_FIELDS,
@@ -214,10 +213,7 @@ class PersonalDataView(APIView):
         password = require_password(request)
         algorithm = _validate_algorithm(request.query_params.get("algorithm"))
         personal_data = _personal_data_for(request.user)
-        try:
-            values = decrypt_personal_data(personal_data, password, algorithm)
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        values = decrypt_personal_data(personal_data, password, algorithm)
         return Response(
             {
                 "algorithm": algorithm,
@@ -260,10 +256,7 @@ class FileListCreateView(APIView):
         if category:
             files = files.filter(category=category.upper())
         files = list(files)
-        try:
-            labels = decrypt_file_labels(files, password)
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        labels = decrypt_file_labels(files, password)
         return Response(StoredFileSerializer(files, many=True, context={"labels": labels}).data)
 
     def post(self, request):
@@ -302,10 +295,7 @@ class FileDetailView(APIView):
     def get(self, request, pk: int):
         password = require_password(request)
         stored_file = self._get_file(request, pk)
-        try:
-            labels = {stored_file.pk: decrypt_file_label(stored_file, password)}
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        labels = {stored_file.pk: decrypt_file_label(stored_file, password)}
         return Response(StoredFileSerializer(stored_file, context={"labels": labels}).data)
 
     def delete(self, request, pk: int):
@@ -333,8 +323,9 @@ class FileDownloadView(APIView):
             label = decrypt_file_label(stored_file, password, algorithm)
             result = decrypt_file(ciphertext, password)
         except IntegrityError:
+            # Record the failed attempt; the exception handler returns 409.
             log_download(stored_file, algorithm, 0.0, 0.0, 0.0, 0, success=False)
-            raise IntegrityCheckFailed()
+            raise
 
         plaintext = result.plaintext
         kdf_ms = result.key_derivation_ms
@@ -368,10 +359,7 @@ class FileCiphertextView(APIView):
         algorithm = _validate_algorithm(request.query_params.get("algorithm"))
         stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
         ciphertext = get_object_or_404(FileCiphertext, file=stored_file, algorithm=algorithm)
-        try:
-            name = decrypt_file_label(stored_file, password).get("name") or f"record-{stored_file.pk}"
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        name = decrypt_file_label(stored_file, password).get("name") or f"record-{stored_file.pk}"
         stem, ext = os.path.splitext(name)
         response = HttpResponse(ciphertext._payload(), content_type="application/octet-stream")
         response["Content-Disposition"] = content_disposition_header(
@@ -408,13 +396,10 @@ class FileBenchmarkView(APIView):
         # Cipher + integrity check only. Key setup (PBKDF2) costs the same for
         # every algorithm and would hide the difference between them.
         cipher_samples = []
-        try:
-            for _ in range(runs):
-                result = ciphertext.decrypt(password)
-                samples.append(result.total_ms)
-                cipher_samples.append(result.cipher_ms + result.mac_ms)
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        for _ in range(runs):
+            result = ciphertext.decrypt(password)
+            samples.append(result.total_ms)
+            cipher_samples.append(result.cipher_ms + result.mac_ms)
 
         return Response(
             {
@@ -445,10 +430,7 @@ class DownloadHistoryView(APIView):
             .order_by("-created_at")[:100]
         )
         files = {event.file_id: event.file for event in events}
-        try:
-            labels = decrypt_file_labels(files.values(), password)
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        labels = decrypt_file_labels(files.values(), password)
         return Response(DownloadEventSerializer(events, many=True, context={"labels": labels}).data)
 
 
@@ -513,16 +495,13 @@ class FileShareListCreateView(APIView):
         stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
         serializer = ShareCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        try:
-            with transaction.atomic():
-                share, key = create_share(
-                    stored_file,
-                    serializer.validated_data["doctor"],
-                    password,
-                    serializer.validated_data["expires_hours"],
-                )
-        except IntegrityError:
-            raise IntegrityCheckFailed()
+        with transaction.atomic():
+            share, key = create_share(
+                stored_file,
+                serializer.validated_data["doctor"],
+                password,
+                serializer.validated_data["expires_hours"],
+            )
         return Response(
             {**FileShareSerializer(share).data, "share_key": key},
             status=status.HTTP_201_CREATED,
