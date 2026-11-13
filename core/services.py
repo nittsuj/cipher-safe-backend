@@ -135,6 +135,30 @@ def decrypt_file(ciphertext: FileCiphertext, password: str):
     return ciphertext.decrypt(password)
 
 
+def benchmark_decryption(ciphertext: FileCiphertext, password: str, runs: int) -> dict:
+    """Decrypt ``ciphertext`` ``runs`` times and summarise the timings.
+
+    ``samples_ms`` is the full decrypt (key setup + cipher + integrity check).
+    ``cipher_samples_ms`` leaves out key setup: PBKDF2 costs the same for every
+    algorithm and would hide the difference between them.
+    """
+
+    samples: list[float] = []
+    cipher_samples: list[float] = []
+    for _ in range(runs):
+        result = ciphertext.decrypt(password)
+        samples.append(result.total_ms)
+        cipher_samples.append(result.cipher_ms + result.mac_ms)
+    return {
+        "samples_ms": samples,
+        "min_ms": min(samples),
+        "max_ms": max(samples),
+        "mean_ms": sum(samples) / len(samples),
+        "cipher_samples_ms": cipher_samples,
+        "cipher_mean_ms": sum(cipher_samples) / len(cipher_samples),
+    }
+
+
 def log_download(
     stored_file: StoredFile,
     algorithm: str,

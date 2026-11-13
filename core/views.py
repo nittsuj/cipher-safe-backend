@@ -43,6 +43,7 @@ from .services import (
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
+    benchmark_decryption,
     store_personal_data,
     store_record,
 )
@@ -389,16 +390,6 @@ class FileBenchmarkView(APIView):
             FileCiphertext, file=stored_file, algorithm=algorithm
         )
 
-        # Decrypt repeatedly to benchmark the full decrypt path.
-        samples = []
-        # Cipher + integrity check only. Key setup (PBKDF2) costs the same for
-        # every algorithm and would hide the difference between them.
-        cipher_samples = []
-        for _ in range(runs):
-            result = ciphertext.decrypt(password)
-            samples.append(result.total_ms)
-            cipher_samples.append(result.cipher_ms + result.mac_ms)
-
         return Response(
             {
                 "file": stored_file.id,
@@ -406,12 +397,7 @@ class FileBenchmarkView(APIView):
                 "mode": ciphertext.mode,
                 "runs": runs,
                 "ciphertext_size": ciphertext.ciphertext_size,
-                "samples_ms": samples,
-                "min_ms": min(samples),
-                "max_ms": max(samples),
-                "mean_ms": sum(samples) / len(samples),
-                "cipher_samples_ms": cipher_samples,
-                "cipher_mean_ms": sum(cipher_samples) / len(cipher_samples),
+                **benchmark_decryption(ciphertext, password, runs),
             }
         )
 
