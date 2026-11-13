@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from django.contrib.auth import authenticate
 from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
@@ -15,7 +17,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, PREVIEWABLE_TYPES, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
 from .models import DownloadEvent, FileCiphertext, PersonalData, StoredFile
 from .serializers import (
@@ -52,6 +54,28 @@ class IntegrityCheckFailed(APIException):
     status_code = status.HTTP_409_CONFLICT
     default_detail = "Integrity check failed: the stored data has been modified."
     default_code = "integrity_check_failed"
+
+
+def file_response(data: bytes, content_type: str, filename: str, inline: bool) -> HttpResponse:
+    """Serve decrypted bytes, inline only for types that cannot run script.
+
+    ``nosniff`` and a sandboxing CSP keep an uploaded HTML/SVG file from
+    executing even if it is opened directly.
+    """
+
+    content_type = content_type or "application/octet-stream"
+    inline = inline and content_type in PREVIEWABLE_TYPES
+    response = HttpResponse(data, content_type=content_type if inline else "application/octet-stream")
+    response["Content-Disposition"] = content_disposition_header(not inline, filename)
+    response["Content-Length"] = str(len(data))
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+def _wants_inline(request) -> bool:
+    return request.query_params.get("inline") in ("1", "true")
 
 
 def password_from_request(request) -> str | None:
@@ -307,14 +331,12 @@ class FileDownloadView(APIView):
         cipher_ms = result.cipher_ms
         log_download(stored_file, algorithm, kdf_ms, cipher_ms, result.mac_ms, len(plaintext))
 
-        response = HttpResponse(
+        response = file_response(
             plaintext,
-            content_type=label.get("content_type") or "application/octet-stream",
+            label.get("content_type", ""),
+            label.get("name") or f"record-{stored_file.pk}",
+            inline=_wants_inline(request),
         )
-        response["Content-Disposition"] = content_disposition_header(
-            True, label.get("name") or f"record-{stored_file.pk}"
-        )
-        response["Content-Length"] = str(len(plaintext))
         response["X-Cipher-Algorithm"] = algorithm
         response["X-Cipher-Decrypt-Ms"] = f"{result.total_ms:.3f}"
         return response

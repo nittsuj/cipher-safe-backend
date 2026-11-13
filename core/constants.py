@@ -20,7 +20,22 @@ FILE_CATEGORY_CHOICES = [
     ("VIDEO", "Medical video (ultrasound, echocardiogram, endoscopy)"),
 ]
 
+#: Content types the browser may render inline in a preview. Anything else
+#: (HTML, SVG, ...) could run script, so it is only offered as a download.
+PREVIEWABLE_TYPES = (
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "video/mp4",
+    "video/webm",
+    "video/ogg",
+    "text/plain",
+)
+
 __all__ = [
+    "PREVIEWABLE_TYPES",
     "ALGORITHM_CHOICES",
     "MODE_CHOICES",
     "FILE_CATEGORY_CHOICES",

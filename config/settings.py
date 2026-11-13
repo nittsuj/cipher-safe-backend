@@ -158,6 +158,8 @@ CORS_ALLOWED_ORIGINS = env.list(
 CORS_ALLOW_CREDENTIALS = True
 # Custom header carrying the cipher password on crypto endpoints.
 CORS_ALLOW_HEADERS = (*default_headers, 'x-cipher-password')
+# Let the SPA read the decrypt timing and the real type of a previewed file.
+CORS_EXPOSE_HEADERS = ('content-disposition', 'x-cipher-algorithm', 'x-cipher-decrypt-ms', 'x-content-type')
 
 
 # File uploads: videos are large, so raise the in-memory threshold.
