@@ -18,10 +18,11 @@ import struct
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
-from django.db.models import F
+from django.db import transaction
+from django.db.models import Avg, Count, F, Max, Min
 from django.utils import timezone
 
-from .constants import SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
 from .crypto import encrypt
 from .models import DownloadEvent, EncryptedValue, FileCiphertext, FileLabel, FileShare, PersonalData, StoredFile
 
@@ -86,6 +87,20 @@ def store_file_ciphertexts(stored_file: StoredFile, data: bytes, password: str) 
     return rows
 
 
+def store_record(owner, category: str, name: str, content_type: str, data: bytes, password: str) -> StoredFile:
+    """Create a record: its row, encrypted label and three encrypted copies.
+
+    Runs in one transaction, so a failure leaves no half-stored record in the
+    database.
+    """
+
+    with transaction.atomic():
+        stored_file = StoredFile.objects.create(owner=owner, category=category, plaintext_size=len(data))
+        store_file_label(stored_file, name, content_type, password)
+        store_file_ciphertexts(stored_file, data, password)
+    return stored_file
+
+
 def store_file_label(stored_file: StoredFile, name: str, content_type: str, password: str) -> None:
     """Encrypt the file name and content type with all three algorithms."""
 
@@ -118,6 +133,30 @@ def decrypt_file(ciphertext: FileCiphertext, password: str):
     """Verify and decrypt one stored ciphertext; returns the ``DecryptionResult``."""
 
     return ciphertext.decrypt(password)
+
+
+def benchmark_decryption(ciphertext: FileCiphertext, password: str, runs: int) -> dict:
+    """Decrypt ``ciphertext`` ``runs`` times and summarise the timings.
+
+    ``samples_ms`` is the full decrypt (key setup + cipher + integrity check).
+    ``cipher_samples_ms`` leaves out key setup: PBKDF2 costs the same for every
+    algorithm and would hide the difference between them.
+    """
+
+    samples: list[float] = []
+    cipher_samples: list[float] = []
+    for _ in range(runs):
+        result = ciphertext.decrypt(password)
+        samples.append(result.total_ms)
+        cipher_samples.append(result.cipher_ms + result.mac_ms)
+    return {
+        "samples_ms": samples,
+        "min_ms": min(samples),
+        "max_ms": max(samples),
+        "mean_ms": sum(samples) / len(samples),
+        "cipher_samples_ms": cipher_samples,
+        "cipher_mean_ms": sum(cipher_samples) / len(cipher_samples),
+    }
 
 
 def log_download(
@@ -215,3 +254,44 @@ def open_share(share: FileShare, key: str) -> tuple[dict[str, str], bytes]:
 def delete_share(share: FileShare) -> None:
     # The blob is removed from disk by the post_delete handler in core.signals.
     share.delete()
+
+
+def timing_summary(owner) -> dict:
+    """Running times per algorithm for one patient (Analysis page).
+
+    ``downloads`` aggregates successful decryptions; ``encryptions`` aggregates
+    the stored copies (one per record and algorithm).
+    """
+
+    total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")
+    downloads = (
+        DownloadEvent.objects.filter(owner=owner, success=True)
+        .annotate(total_ms=total)
+        .values("algorithm")
+        .annotate(
+            runs=Count("id"),
+            min_ms=Min("total_ms"),
+            max_ms=Max("total_ms"),
+            mean_ms=Avg("total_ms"),
+        )
+        .order_by("algorithm")
+    )
+    encryptions = (
+        FileCiphertext.objects.filter(file__owner=owner)
+        .annotate(total_ms=total)
+        .values("algorithm")
+        .annotate(
+            files=Count("id"),
+            min_ms=Min("total_ms"),
+            max_ms=Max("total_ms"),
+            mean_ms=Avg("total_ms"),
+            mean_ciphertext_size=Avg("ciphertext_size"),
+        )
+        .order_by("algorithm")
+    )
+    return {
+        "supported_algorithms": list(SUPPORTED_ALGORITHMS),
+        "modes": MODE_FOR,
+        "downloads": list(downloads),
+        "encryptions": list(encryptions),
+    }
