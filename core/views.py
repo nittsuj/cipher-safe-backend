@@ -10,14 +10,14 @@ from django.shortcuts import get_object_or_404
 from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import MODE_FOR, PREVIEWABLE_TYPES, SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
 from .models import DownloadEvent, FileCiphertext, PersonalData, StoredFile
 from .serializers import (
@@ -54,6 +54,18 @@ class IntegrityCheckFailed(APIException):
     status_code = status.HTTP_409_CONFLICT
     default_detail = "Integrity check failed: the stored data has been modified."
     default_code = "integrity_check_failed"
+
+
+class IsPatient(BasePermission):
+    """Vault endpoints: only patients own records."""
+
+    message = "Only patient accounts have a records vault."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role == ROLE_PATIENT)
+
+
+PATIENT_ONLY = [IsAuthenticated, IsPatient]
 
 
 def file_response(data: bytes, content_type: str, filename: str, inline: bool) -> HttpResponse:
@@ -195,7 +207,7 @@ class PersonalDataView(APIView):
     and RC4, replacing the previous profile.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -238,7 +250,7 @@ class PersonalDataView(APIView):
 
 
 class FileListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -281,7 +293,7 @@ class FileListCreateView(APIView):
 
 
 class FileDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def _get_file(self, request, pk: int) -> StoredFile:
         return get_object_or_404(StoredFile, pk=pk, owner=request.user)
@@ -308,7 +320,7 @@ class FileDetailView(APIView):
 class FileDownloadView(APIView):
     """Decrypt and stream a file, recording the running time."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request, pk: int):
         password = require_password(request)
@@ -351,7 +363,7 @@ class FileCiphertextView(APIView):
     name for that.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request, pk: int):
         password = require_password(request)
@@ -374,7 +386,7 @@ class FileCiphertextView(APIView):
 class FileBenchmarkView(APIView):
     """Run N server-side decryptions of one file and return timing statistics."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "benchmark"
     MAX_RUNS = 50
@@ -424,7 +436,7 @@ class FileBenchmarkView(APIView):
 
 
 class DownloadHistoryView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -445,7 +457,7 @@ class DownloadHistoryView(APIView):
 class TimingAnalysisView(APIView):
     """Aggregate running times per algorithm (Analysis page)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")

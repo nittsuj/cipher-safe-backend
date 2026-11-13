@@ -46,7 +46,7 @@ PII_FIELDS = (
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ["id", "username", "date_joined"]
+        fields = ["id", "username", "role", "date_joined"]
         read_only_fields = fields
 
 
@@ -55,7 +55,8 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "username", "password"]
+        fields = ["id", "username", "password", "role"]
+        extra_kwargs = {"role": {"required": False}}
 
     def validate(self, attrs):
         # Run Django's configured password validators (length, common-password,

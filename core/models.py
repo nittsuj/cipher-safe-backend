@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
-from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES
+from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES, ROLE_CHOICES, ROLE_PATIENT
 from .crypto import decrypt as decrypt_payload
 
 
@@ -13,7 +13,12 @@ class User(AbstractUser):
     All GDPR / UU PDP personal data, including the health data that both laws
     treat as a special/specific category, is stored encrypted in
     :class:`PersonalData` and :class:`StoredFile`, never as a plain column here.
+
+    ``role`` separates patients (who own a vault) from doctors (who can only
+    open records a patient has shared with them, using the share key).
     """
+
+    role = models.CharField(max_length=8, choices=ROLE_CHOICES, default=ROLE_PATIENT)
 
     def __str__(self) -> str:
         return self.username

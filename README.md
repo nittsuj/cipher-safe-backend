@@ -200,7 +200,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/auth/register/` | Create a user, returns `access`, `refresh` and `user` |
+| POST | `/api/auth/register/` | Create a user (`role`: `PATIENT` default, or `DOCTOR`), returns `access`, `refresh` and `user` |
 | POST | `/api/auth/login/` | Obtain `access` + `refresh` tokens |
 | POST | `/api/auth/refresh/` | Exchange a refresh token for a new pair |
 | POST | `/api/auth/logout/` | Blacklist the supplied refresh token |

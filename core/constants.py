@@ -20,6 +20,11 @@ FILE_CATEGORY_CHOICES = [
     ("VIDEO", "Medical video (ultrasound, echocardiogram, endoscopy)"),
 ]
 
+#: Account roles. Patients own a vault; doctors only receive shared records.
+ROLE_PATIENT = "PATIENT"
+ROLE_DOCTOR = "DOCTOR"
+ROLE_CHOICES = [(ROLE_PATIENT, "Patient"), (ROLE_DOCTOR, "Doctor")]
+
 #: Content types the browser may render inline in a preview. Anything else
 #: (HTML, SVG, ...) could run script, so it is only offered as a download.
 PREVIEWABLE_TYPES = (
@@ -36,6 +41,9 @@ PREVIEWABLE_TYPES = (
 
 __all__ = [
     "PREVIEWABLE_TYPES",
+    "ROLE_CHOICES",
+    "ROLE_DOCTOR",
+    "ROLE_PATIENT",
     "ALGORITHM_CHOICES",
     "MODE_CHOICES",
     "FILE_CATEGORY_CHOICES",
