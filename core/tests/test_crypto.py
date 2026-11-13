@@ -28,6 +28,8 @@ class CryptoPrimitiveTests(SimpleTestCase):
         payloads = [b"", b"short", b"A" * 16, bytes(range(256)) * 32]
         for algorithm in SUPPORTED_ALGORITHMS:
             modes = [None] if algorithm == "RC4" else list(SUPPORTED_MODES)
+            if algorithm == "DES":
+                modes.remove("GCM")  # GCM needs a 128-bit block
             for mode in modes:
                 for data in payloads:
                     result = encrypt(data, PASSWORD, algorithm, mode)
@@ -64,6 +66,36 @@ class CryptoPrimitiveTests(SimpleTestCase):
         result = encrypt(b"same key stream, other label", PASSWORD, "AES", "CTR")
         with self.assertRaises(IntegrityError):
             _decrypt(result, mode="OFB")
+
+    def test_aes_uses_gcm_with_its_own_tag(self):
+        result = encrypt(b"lab result", PASSWORD, "AES")
+        self.assertEqual(result.mode, "GCM")
+        self.assertEqual(len(result.iv), 12)
+        self.assertEqual(len(result.tag), 16)
+        self.assertEqual(result.mac_ms, 0.0)
+
+    def test_gcm_tag_tampering_is_detected(self):
+        result = encrypt(b"HIV test: negative", PASSWORD, "AES", "GCM")
+        tag = bytearray(result.tag)
+        tag[0] ^= 0x01
+        with self.assertRaises(IntegrityError):
+            _decrypt(result, tag=bytes(tag))
+
+    def test_gcm_parameters_are_bound_as_associated_data(self):
+        result = encrypt(b"bound to its salt", PASSWORD, "AES", "GCM")
+        salt = bytearray(result.salt)
+        salt[0] ^= 0x01
+        with self.assertRaises(IntegrityError):
+            _decrypt(result, salt=bytes(salt))
+
+    def test_des_rejects_gcm(self):
+        with self.assertRaises(ValueError):
+            encrypt(b"x", PASSWORD, "DES", "GCM")
+
+    def test_legacy_aes_ctr_records_still_decrypt(self):
+        # Rows written before the switch to GCM keep their stored mode.
+        result = encrypt(b"old record", PASSWORD, "AES", "CTR")
+        self.assertEqual(_decrypt(result).plaintext, b"old record")
 
     def test_unknown_algorithm_is_rejected(self):
         with self.assertRaises(ValueError):

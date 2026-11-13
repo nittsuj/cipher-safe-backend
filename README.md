@@ -153,11 +153,11 @@ sequenceDiagram
 | --- | --- |
 | Key derivation | **PBKDF2-HMAC-SHA256**, 600,000 iterations, random 16-byte salt per operation; one derivation yields the cipher key and a separate 32-byte MAC key |
 | Key source | The user's **password** (never stored); verified against the Django password hash before any crypto work |
-| AES | AES-**256**-**CTR** (CBC/CFB-128/OFB available to the benchmark) |
+| AES | AES-**256**-**GCM** (AEAD: its own 128-bit tag, parameters bound as associated data; CBC/CFB-128/OFB/CTR available to the benchmark) |
 | DES | DES-**CTR** (legacy, required by the assignment) |
 | RC4 | RC4 stream cipher (legacy, for comparison only) |
-| Integrity | **HMAC-SHA256** over version, algorithm, mode, salt, IV and ciphertext; checked in constant time before decrypting |
-| Padding | none in CTR/RC4; PKCS#7 only if CBC is benchmarked |
+| Integrity | AES: the **GCM tag**. DES/RC4: **HMAC-SHA256** over version, algorithm, mode, salt, IV and ciphertext, checked in constant time before decrypting |
+| Padding | none in GCM/CTR/RC4; PKCS#7 only if CBC is benchmarked |
 | Storage | salt + IV + tag per ciphertext; one row/blob per algorithm |
 
 For a full implementation walkthrough with code, see
