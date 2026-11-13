@@ -43,9 +43,8 @@ from .services import (
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
-    store_file_ciphertexts,
-    store_file_label,
     store_personal_data,
+    store_record,
 )
 
 
@@ -270,15 +269,14 @@ class FileListCreateView(APIView):
             raise ValidationError({"file": "The uploaded file is empty."})
 
         label = {"name": upload.name, "content_type": getattr(upload, "content_type", "") or ""}
-        with transaction.atomic():
-            stored_file = StoredFile.objects.create(
-                owner=request.user,
-                category=serializer.validated_data["category"],
-                plaintext_size=len(data),
-            )
-            store_file_label(stored_file, label["name"], label["content_type"], password)
-            store_file_ciphertexts(stored_file, data, password)
-
+        stored_file = store_record(
+            request.user,
+            serializer.validated_data["category"],
+            label["name"],
+            label["content_type"],
+            data,
+            password,
+        )
         stored_file.refresh_from_db()
         return Response(
             StoredFileSerializer(stored_file, context={"labels": {stored_file.pk: label}}).data,

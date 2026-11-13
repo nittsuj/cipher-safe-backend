@@ -18,6 +18,7 @@ import struct
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -84,6 +85,20 @@ def store_file_ciphertexts(stored_file: StoredFile, data: bytes, password: str) 
         row.save()
         rows.append(row)
     return rows
+
+
+def store_record(owner, category: str, name: str, content_type: str, data: bytes, password: str) -> StoredFile:
+    """Create a record: its row, encrypted label and three encrypted copies.
+
+    Runs in one transaction, so a failure leaves no half-stored record in the
+    database.
+    """
+
+    with transaction.atomic():
+        stored_file = StoredFile.objects.create(owner=owner, category=category, plaintext_size=len(data))
+        store_file_label(stored_file, name, content_type, password)
+        store_file_ciphertexts(stored_file, data, password)
+    return stored_file
 
 
 def store_file_label(stored_file: StoredFile, name: str, content_type: str, password: str) -> None:
