@@ -111,6 +111,8 @@ AUTH_USER_MODEL = 'core.User'
 
 # Django REST Framework
 REST_FRAMEWORK = {
+    # Maps core.crypto.IntegrityError to HTTP 409 (see core/exceptions.py).
+    'EXCEPTION_HANDLER': 'core.exceptions.exception_handler',
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],

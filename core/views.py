@@ -10,7 +10,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.http import content_disposition_header
 from rest_framework import status
-from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -20,6 +20,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
+from .exceptions import IntegrityCheckFailed
 from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
 from .serializers import (
     PII_FIELDS,
@@ -47,20 +48,6 @@ from .services import (
     store_file_label,
     store_personal_data,
 )
-
-
-class IntegrityCheckFailed(APIException):
-    """The stored ciphertext failed its HMAC check.
-
-    The password has already been verified against the user's hash by the
-    time this can happen, so a failed tag means the stored data (ciphertext,
-    salt, IV or parameters) was modified. Nothing is returned rather than
-    corrupted plaintext.
-    """
-
-    status_code = status.HTTP_409_CONFLICT
-    default_detail = "Integrity check failed: the stored data has been modified."
-    default_code = "integrity_check_failed"
 
 
 class IsPatient(BasePermission):
