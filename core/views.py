@@ -4,7 +4,6 @@ import os
 
 from django.contrib.auth import authenticate
 from django.db import transaction
-from django.db.models import Avg, Count, F, Max, Min
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -18,7 +17,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
+from .constants import PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
 from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
 from .serializers import (
@@ -46,6 +45,7 @@ from .services import (
     benchmark_decryption,
     store_personal_data,
     store_record,
+    timing_summary,
 )
 
 
@@ -424,40 +424,7 @@ class TimingAnalysisView(APIView):
     permission_classes = PATIENT_ONLY
 
     def get(self, request):
-        total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")
-        downloads = (
-            DownloadEvent.objects.filter(owner=request.user, success=True)
-            .annotate(total_ms=total)
-            .values("algorithm")
-            .annotate(
-                runs=Count("id"),
-                min_ms=Min("total_ms"),
-                max_ms=Max("total_ms"),
-                mean_ms=Avg("total_ms"),
-            )
-            .order_by("algorithm")
-        )
-        encryptions = (
-            FileCiphertext.objects.filter(file__owner=request.user)
-            .annotate(total_ms=total)
-            .values("algorithm")
-            .annotate(
-                files=Count("id"),
-                min_ms=Min("total_ms"),
-                max_ms=Max("total_ms"),
-                mean_ms=Avg("total_ms"),
-                mean_ciphertext_size=Avg("ciphertext_size"),
-            )
-            .order_by("algorithm")
-        )
-        return Response(
-            {
-                "supported_algorithms": list(SUPPORTED_ALGORITHMS),
-                "modes": MODE_FOR,
-                "downloads": list(downloads),
-                "encryptions": list(encryptions),
-            }
-        )
+        return Response(timing_summary(request.user))
 
 
 class FileShareListCreateView(APIView):

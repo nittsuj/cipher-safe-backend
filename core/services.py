@@ -19,10 +19,10 @@ from datetime import timedelta
 
 from django.core.files.base import ContentFile
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Avg, Count, F, Max, Min
 from django.utils import timezone
 
-from .constants import SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
 from .crypto import encrypt
 from .models import DownloadEvent, EncryptedValue, FileCiphertext, FileLabel, FileShare, PersonalData, StoredFile
 
@@ -254,3 +254,44 @@ def open_share(share: FileShare, key: str) -> tuple[dict[str, str], bytes]:
 def delete_share(share: FileShare) -> None:
     # The blob is removed from disk by the post_delete handler in core.signals.
     share.delete()
+
+
+def timing_summary(owner) -> dict:
+    """Running times per algorithm for one patient (Analysis page).
+
+    ``downloads`` aggregates successful decryptions; ``encryptions`` aggregates
+    the stored copies (one per record and algorithm).
+    """
+
+    total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")
+    downloads = (
+        DownloadEvent.objects.filter(owner=owner, success=True)
+        .annotate(total_ms=total)
+        .values("algorithm")
+        .annotate(
+            runs=Count("id"),
+            min_ms=Min("total_ms"),
+            max_ms=Max("total_ms"),
+            mean_ms=Avg("total_ms"),
+        )
+        .order_by("algorithm")
+    )
+    encryptions = (
+        FileCiphertext.objects.filter(file__owner=owner)
+        .annotate(total_ms=total)
+        .values("algorithm")
+        .annotate(
+            files=Count("id"),
+            min_ms=Min("total_ms"),
+            max_ms=Max("total_ms"),
+            mean_ms=Avg("total_ms"),
+            mean_ciphertext_size=Avg("ciphertext_size"),
+        )
+        .order_by("algorithm")
+    )
+    return {
+        "supported_algorithms": list(SUPPORTED_ALGORITHMS),
+        "modes": MODE_FOR,
+        "downloads": list(downloads),
+        "encryptions": list(encryptions),
+    }
