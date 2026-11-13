@@ -24,3 +24,20 @@ class AuthApiTests(AuthenticatedApiTestCase):
             "/api/auth/refresh/", {"refresh": self.refresh}, format="json"
         )
         self.assertEqual(refreshed.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class RoleTests(AuthenticatedApiTestCase):
+    def test_register_defaults_to_patient(self):
+        self.assertEqual(self.client.get("/api/me/").json()["role"], "PATIENT")
+
+    def test_doctor_has_no_records_vault(self):
+        self.client.credentials()
+        body = self.client.post(
+            "/api/auth/register/",
+            {"username": "dr-budi", "password": "AnotherSecret123!", "role": "DOCTOR"},
+            format="json",
+        ).json()
+        self.assertEqual(body["user"]["role"], "DOCTOR")
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {body['access']}")
+        response = self.client.get("/api/files/", HTTP_X_CIPHER_PASSWORD="AnotherSecret123!")
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)

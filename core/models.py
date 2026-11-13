@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
-from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES
+from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES, ROLE_CHOICES, ROLE_PATIENT
 from .crypto import decrypt as decrypt_payload
 
 
@@ -13,7 +13,12 @@ class User(AbstractUser):
     All GDPR / UU PDP personal data, including the health data that both laws
     treat as a special/specific category, is stored encrypted in
     :class:`PersonalData` and :class:`StoredFile`, never as a plain column here.
+
+    ``role`` separates patients (who own a vault) from doctors (who can only
+    open records a patient has shared with them, using the share key).
     """
+
+    role = models.CharField(max_length=8, choices=ROLE_CHOICES, default=ROLE_PATIENT)
 
     def __str__(self) -> str:
         return self.username
@@ -218,3 +223,34 @@ class DownloadEvent(models.Model):
 
     def __str__(self) -> str:
         return f"Record {self.file_id} [{self.algorithm}] {self.total_ms:.1f} ms"
+
+
+class FileShare(EncryptionEnvelope):
+    """A copy of one record that a patient has shared with one doctor.
+
+    When the patient shares a record, the server decrypts it with the
+    patient's password and re-encrypts it (AES-GCM) under a fresh random
+    **share key**. The key is shown to the patient once and never stored; the
+    patient sends it to the doctor themselves. Without it the doctor sees only
+    who shared what kind of record, not its name or content.
+
+    The encrypted payload holds the label and the file bytes together (see
+    :func:`core.services.pack_share_payload`).
+    """
+
+    file = models.ForeignKey(StoredFile, on_delete=models.CASCADE, related_name="shares")
+    doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name="received_shares")
+    blob = models.FileField(upload_to="shares/%Y/%m/")
+    expires_at = models.DateTimeField()
+    access_count = models.PositiveIntegerField(default=0)
+    last_accessed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def _payload(self) -> bytes:
+        self.blob.seek(0)
+        return bytes(self.blob.read())
+
+    def __str__(self) -> str:
+        return f"Record {self.file_id} -> {self.doctor.username}"

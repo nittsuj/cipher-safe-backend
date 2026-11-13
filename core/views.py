@@ -7,22 +7,26 @@ from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from django.utils.http import content_disposition_header
 from rest_framework import status
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import MODE_FOR, PREVIEWABLE_TYPES, SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
 from .crypto import IntegrityError
-from .models import DownloadEvent, FileCiphertext, PersonalData, StoredFile
+from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
 from .serializers import (
     PII_FIELDS,
     DownloadEventSerializer,
+    FileShareSerializer,
+    ReceivedShareSerializer,
+    ShareCreateSerializer,
     FileUploadSerializer,
     LoginSerializer,
     PersonalDataSerializer,
@@ -31,7 +35,10 @@ from .serializers import (
     UserSerializer,
 )
 from .services import (
+    create_share,
     decrypt_file,
+    delete_share,
+    open_share,
     decrypt_file_label,
     decrypt_file_labels,
     decrypt_personal_data,
@@ -54,6 +61,25 @@ class IntegrityCheckFailed(APIException):
     status_code = status.HTTP_409_CONFLICT
     default_detail = "Integrity check failed: the stored data has been modified."
     default_code = "integrity_check_failed"
+
+
+class IsPatient(BasePermission):
+    """Vault endpoints: only patients own records."""
+
+    message = "Only patient accounts have a records vault."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role == ROLE_PATIENT)
+
+
+class IsDoctor(BasePermission):
+    message = "Only doctor accounts receive shared records."
+
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and request.user.role == ROLE_DOCTOR)
+
+
+PATIENT_ONLY = [IsAuthenticated, IsPatient]
 
 
 def file_response(data: bytes, content_type: str, filename: str, inline: bool) -> HttpResponse:
@@ -195,7 +221,7 @@ class PersonalDataView(APIView):
     and RC4, replacing the previous profile.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -238,7 +264,7 @@ class PersonalDataView(APIView):
 
 
 class FileListCreateView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -281,7 +307,7 @@ class FileListCreateView(APIView):
 
 
 class FileDetailView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def _get_file(self, request, pk: int) -> StoredFile:
         return get_object_or_404(StoredFile, pk=pk, owner=request.user)
@@ -301,6 +327,8 @@ class FileDetailView(APIView):
         # so a deleted record leaves no ciphertext behind.
         for ciphertext in stored_file.ciphertexts.all():
             ciphertext.blob.delete(save=False)
+        for share in stored_file.shares.all():
+            share.blob.delete(save=False)
         stored_file.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -308,7 +336,7 @@ class FileDetailView(APIView):
 class FileDownloadView(APIView):
     """Decrypt and stream a file, recording the running time."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request, pk: int):
         password = require_password(request)
@@ -351,7 +379,7 @@ class FileCiphertextView(APIView):
     name for that.
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request, pk: int):
         password = require_password(request)
@@ -374,7 +402,7 @@ class FileCiphertextView(APIView):
 class FileBenchmarkView(APIView):
     """Run N server-side decryptions of one file and return timing statistics."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "benchmark"
     MAX_RUNS = 50
@@ -424,7 +452,7 @@ class FileBenchmarkView(APIView):
 
 
 class DownloadHistoryView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         password = require_password(request)
@@ -445,7 +473,7 @@ class DownloadHistoryView(APIView):
 class TimingAnalysisView(APIView):
     """Aggregate running times per algorithm (Analysis page)."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = PATIENT_ONLY
 
     def get(self, request):
         total = F("key_derivation_ms") + F("cipher_ms") + F("mac_ms")
@@ -482,3 +510,89 @@ class TimingAnalysisView(APIView):
                 "encryptions": list(encryptions),
             }
         )
+
+
+class FileShareListCreateView(APIView):
+    """List a record's shares, or share it with a doctor.
+
+    POST re-encrypts the record under a fresh share key and returns that key
+    **once**; the patient sends it to the doctor themselves.
+    """
+
+    permission_classes = PATIENT_ONLY
+
+    def get(self, request, pk: int):
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        shares = stored_file.shares.select_related("doctor")
+        return Response(FileShareSerializer(shares, many=True).data)
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        serializer = ShareCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                share, key = create_share(
+                    stored_file,
+                    serializer.validated_data["doctor"],
+                    password,
+                    serializer.validated_data["expires_hours"],
+                )
+        except IntegrityError:
+            raise IntegrityCheckFailed()
+        return Response(
+            {**FileShareSerializer(share).data, "share_key": key},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class FileShareRevokeView(APIView):
+    permission_classes = PATIENT_ONLY
+
+    def delete(self, request, pk: int):
+        share = get_object_or_404(FileShare, pk=pk, file__owner=request.user)
+        delete_share(share)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ReceivedShareListView(APIView):
+    """Records shared with the signed-in doctor that have not expired."""
+
+    permission_classes = [IsAuthenticated, IsDoctor]
+
+    def get(self, request):
+        shares = FileShare.objects.filter(doctor=request.user, expires_at__gt=timezone.now()).select_related(
+            "file", "file__owner"
+        )
+        return Response(ReceivedShareSerializer(shares, many=True).data)
+
+
+class ReceivedShareOpenView(APIView):
+    """Decrypt a shared record with the share key (``X-Share-Key`` header).
+
+    The key is never stored, so the server cannot open the share without it.
+    Throttled because the key is the only secret.
+    """
+
+    permission_classes = [IsAuthenticated, IsDoctor]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "share"
+
+    def get(self, request, pk: int):
+        key = request.headers.get("X-Share-Key", "")
+        if not key:
+            raise ValidationError({"share_key": "Enter the share key the patient sent you."})
+        share = get_object_or_404(FileShare, pk=pk, doctor=request.user, expires_at__gt=timezone.now())
+        try:
+            label, data = open_share(share, key)
+        except IntegrityError:
+            raise PermissionDenied("Wrong share key.")
+        response = file_response(
+            data,
+            label.get("content_type", ""),
+            label.get("name") or f"shared-record-{share.pk}",
+            inline=_wants_inline(request),
+        )
+        response["X-Content-Type"] = label.get("content_type", "")
+        return response

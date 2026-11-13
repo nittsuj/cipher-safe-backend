@@ -11,13 +11,19 @@ it in :data:`core.crypto.MODE_FOR`.
 
 from __future__ import annotations
 
+import base64
 import json
+import secrets
+import struct
+from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.db.models import F
+from django.utils import timezone
 
 from .constants import SUPPORTED_ALGORITHMS
 from .crypto import encrypt
-from .models import DownloadEvent, EncryptedValue, FileCiphertext, FileLabel, PersonalData, StoredFile
+from .models import DownloadEvent, EncryptedValue, FileCiphertext, FileLabel, FileShare, PersonalData, StoredFile
 
 #: ``EncryptedValue.field_name`` of the single encrypted patient-profile record.
 PROFILE_RECORD = "profile"
@@ -135,3 +141,77 @@ def log_download(
         cipher_ms=cipher_ms,
         mac_ms=mac_ms,
     )
+
+
+# --- Sharing with a doctor --------------------------------------------------
+
+#: Algorithm used for share copies. AES-GCM authenticates as it decrypts, so a
+#: wrong share key is rejected rather than producing garbage.
+SHARE_ALGORITHM = "AES"
+
+#: Share keys are 100 random bits, written as 20 base32 characters in groups
+#: of four (``K7QX-2M9A-...``) so a patient can read them out or type them.
+_SHARE_KEY_BYTES = 13  # 104 bits -> 21 base32 chars, trimmed to 20 (100 bits)
+
+
+def new_share_key() -> str:
+    raw = base64.b32encode(secrets.token_bytes(_SHARE_KEY_BYTES)).decode("ascii")[:20]
+    return "-".join(raw[i : i + 4] for i in range(0, 20, 4))
+
+
+def normalise_share_key(key: str) -> str:
+    """Accept the key with or without dashes, spaces or lower case."""
+
+    raw = "".join(ch for ch in key.upper() if ch.isalnum())
+    return "-".join(raw[i : i + 4] for i in range(0, len(raw), 4))
+
+
+def pack_share_payload(label: dict[str, str], data: bytes) -> bytes:
+    """``len(label) || label JSON || file bytes``: one ciphertext holds both."""
+
+    header = json.dumps(label, ensure_ascii=False).encode("utf-8")
+    return struct.pack(">I", len(header)) + header + data
+
+
+def unpack_share_payload(payload: bytes) -> tuple[dict[str, str], bytes]:
+    (size,) = struct.unpack(">I", payload[:4])
+    return json.loads(payload[4 : 4 + size].decode("utf-8")), payload[4 + size :]
+
+
+def create_share(stored_file: StoredFile, doctor, password: str, expires_hours: int) -> tuple[FileShare, str]:
+    """Re-encrypt a record under a fresh share key for ``doctor``.
+
+    Returns the share and the key. The key is not stored anywhere; the caller
+    shows it to the patient once.
+    """
+
+    label = decrypt_file_label(stored_file, password, SHARE_ALGORITHM)
+    source = stored_file.ciphertexts.get(algorithm=SHARE_ALGORITHM)
+    data = decrypt_file(source, password).plaintext
+
+    key = new_share_key()
+    result = encrypt(pack_share_payload(label, data), key, algorithm=SHARE_ALGORITHM)
+    share = FileShare(
+        file=stored_file,
+        doctor=doctor,
+        expires_at=timezone.now() + timedelta(hours=expires_hours),
+    )
+    share.apply_result(result)
+    share.blob.save(f"{stored_file.pk}-{secrets.token_hex(4)}.bin", ContentFile(result.ciphertext), save=False)
+    share.save()
+    return share, key
+
+
+def open_share(share: FileShare, key: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a share with its key; raises ``IntegrityError`` on a wrong key."""
+
+    payload = share.decrypt(normalise_share_key(key)).plaintext
+    FileShare.objects.filter(pk=share.pk).update(
+        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
+    )
+    return unpack_share_payload(payload)
+
+
+def delete_share(share: FileShare) -> None:
+    share.blob.delete(save=False)
+    share.delete()

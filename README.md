@@ -168,6 +168,17 @@ For a full implementation walkthrough with code, see
 > credential submission. The query string is deliberately not accepted, since
 > URLs are recorded in access logs, browser history and `Referer` headers.
 
+## Sharing with a doctor
+
+Accounts are either **patients** (own a vault) or **doctors** (only receive
+shares). To share, the patient's record is decrypted with their password and
+re-encrypted with **AES-256-GCM** under a fresh random **share key** (100 bits,
+shown as `XXXX-XXXX-XXXX-XXXX-XXXX`). The key is returned once and never
+stored; the patient sends it to the doctor themselves. The share copy holds the
+file name and bytes together, so the doctor sees only who shared what kind of
+record until they enter the key. Shares expire (1 hour to 1 week), can be
+revoked, count how often they were opened, and the open endpoint is throttled.
+
 ## Setup
 
 Requires Python 3.12+ and a PostgreSQL instance (`docker-compose up -d db`).
@@ -200,7 +211,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/auth/register/` | Create a user, returns `access`, `refresh` and `user` |
+| POST | `/api/auth/register/` | Create a user (`role`: `PATIENT` default, or `DOCTOR`), returns `access`, `refresh` and `user` |
 | POST | `/api/auth/login/` | Obtain `access` + `refresh` tokens |
 | POST | `/api/auth/refresh/` | Exchange a refresh token for a new pair |
 | POST | `/api/auth/logout/` | Blacklist the supplied refresh token |
@@ -211,9 +222,14 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | POST | `/api/files/` | Upload (`file`, `category`); encrypts with all algorithms |
 | GET | `/api/files/{id}/` | File metadata + per-algorithm ciphertext info |
 | DELETE | `/api/files/{id}/` | Delete a file |
-| GET | `/api/files/{id}/download/?algorithm=DES` | Decrypt and download |
+| GET | `/api/files/{id}/download/?algorithm=DES&inline=1` | Decrypt and download; `inline=1` serves safe types (PDF, images, video, text) for in-browser preview |
 | GET | `/api/files/{id}/ciphertext/?algorithm=DES` | Download the stored copy as-is (ciphertext), keeping the original extension (`lab.DES-encrypted.pdf`); needs the password |
 | GET | `/api/files/{id}/benchmark/?algorithm=AES&runs=10` | N timed decryptions (total and cipher-only samples) |
+| GET | `/api/files/{id}/shares/` | Patient: list shares of a record |
+| POST | `/api/files/{id}/shares/` | Patient: share with a doctor (`doctor`, `expires_hours` 1-168); returns the one-time `share_key` |
+| DELETE | `/api/shares/{id}/` | Patient: stop sharing |
+| GET | `/api/shares/received/` | Doctor: unexpired records shared with me (name stays encrypted) |
+| GET | `/api/shares/received/{id}/open/?inline=1` | Doctor: decrypt with the `X-Share-Key` header |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 
