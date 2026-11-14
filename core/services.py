@@ -12,6 +12,7 @@ it in :data:`core.crypto.MODE_FOR`.
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 import secrets
@@ -36,7 +37,7 @@ from .constants import (
     REQUEST_PENDING,
     SUPPORTED_ALGORITHMS,
 )
-from .exceptions import InvalidTransition, RequesterHasNoKey
+from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
     SealedData,
@@ -49,6 +50,8 @@ from .crypto import (
     load_public_key,
     new_salt,
     new_symmetric_key,
+    parse_envelope,
+    unwrap_key,
     wrap_key,
     fingerprint,
     generate_rsa_key_pair,
@@ -581,3 +584,65 @@ def envelope_for_owner(item: GrantedItem, owner_password: str) -> str:
     owner_kek = user_kek(owner_password, bytes(shared_key.owner_salt))
     wrapped = decrypt_with_key(sealed, owner_kek, shared_key.aad("envelope"))
     return format_envelope(item.request_id, item.pk, wrapped)
+
+
+
+# ------------------------------------------------- redeeming and opening
+
+
+def redeem_item(item: GrantedItem, requester_password: str, envelope_text: str) -> GrantedItem:
+    """The requester enters the envelope the owner sent them.
+
+    1. Parse it and check it names this request and item (``ValueError``).
+    2. Compare its hash with the stored one, before any RSA work
+       (:class:`EnvelopeMismatch`: a different envelope).
+    3. Unlock the requester's private key with their password and open the
+       envelope (RSA-OAEP), then check the key really opens the item
+       (``IntegrityError``: modified envelope or data).
+    4. Store the key encrypted for the requester, so they don't need the
+       envelope again until access ends.
+    """
+
+    envelope = parse_envelope(envelope_text)
+    if (envelope.request_id, envelope.item_id) != (item.request_id, item.pk):
+        raise ValueError("This key belongs to another item.")
+    shared_key = item.shared_key
+    if not hmac.compare_digest(envelope_digest(envelope.wrapped_key), shared_key.envelope_sha256):
+        raise EnvelopeMismatch()
+
+    private_key = load_private_key(shared_key.requester_key, requester_password)
+    started = time.perf_counter()
+    key = unwrap_key(private_key, envelope.wrapped_key)
+    unwrap_ms = (time.perf_counter() - started) * 1000
+    decrypt_with_key(item.sealed(), key, item.aad)  # proves K opens this copy
+
+    sealed, salt = seal_key_for_user(key, requester_password, shared_key.aad("requester"))
+    shared_key.key_for_requester, shared_key.requester_nonce = sealed.ciphertext, sealed.nonce
+    shared_key.requester_salt = salt
+    shared_key.redeemed_at = timezone.now()
+    shared_key.save(update_fields=["key_for_requester", "requester_nonce", "requester_salt", "redeemed_at"])
+    key_log.info("unwrap item=%s rsa_oaep_ms=%.3f", item.pk, unwrap_ms)
+    return item
+
+
+def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a redeemed item for the requester.
+
+    Returns ``(label, data)``: for a record its name, type and bytes; for a
+    profile snapshot ``{"name": "profile.json", "content_type": "application/json"}``
+    and the JSON. Counts the access.
+    """
+
+    shared_key = item.shared_key
+    if shared_key.key_for_requester is None:
+        raise NotRedeemed()
+    sealed = SealedData(bytes(shared_key.requester_nonce), bytes(shared_key.key_for_requester))
+    salt = bytes(shared_key.requester_salt)
+    key = open_key_for_user(sealed, salt, requester_password, shared_key.aad("requester"))
+    payload = decrypt_with_key(item.sealed(), key, item.aad)
+    GrantedItem.objects.filter(pk=item.pk).update(
+        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
+    )
+    if item.kind == GRANT_KIND_PROFILE:
+        return {"name": "profile.json", "content_type": "application/json"}, payload
+    return unpack_share_payload(payload)

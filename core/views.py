@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from django.contrib.auth import authenticate
@@ -22,6 +23,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .constants import (
     KEY_PURPOSE_CHOICES,
     KEY_PURPOSE_ENCRYPTION,
+    GRANT_KIND_PROFILE,
     PREVIEWABLE_TYPES,
     REQUEST_APPROVED,
     ROLE_DOCTOR,
@@ -55,6 +57,7 @@ from .serializers import (
     LoginSerializer,
     PersonalDataSerializer,
     PublicKeySerializer,
+    RedeemSerializer,
     RegisterSerializer,
     StoredFileSerializer,
     UserSerializer,
@@ -70,6 +73,8 @@ from .services import (
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
+    open_item,
+    redeem_item,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -538,7 +543,7 @@ class ReceivedShareOpenView(APIView):
             label.get("name") or f"shared-record-{share.pk}",
             inline=_wants_inline(request),
         )
-        response["X-Content-Type"] = label.get("content_type", "")
+        response["X-Content-Type"] = content_type
         return response
 
 
@@ -737,3 +742,58 @@ class GrantedItemEnvelopeView(APIView):
                 "recipient_fingerprint": item.shared_key.requester_key.fingerprint,
             }
         )
+
+
+def _requested_item(user, pk: int, item_id: int) -> GrantedItem:
+    """An item of a live request where ``user`` is the requester."""
+
+    access_request = _request_for(user, pk)
+    if access_request.requester_id != user.pk:
+        raise PermissionDenied("Only the requester can do this.")
+    return _live_item(access_request, item_id)
+
+
+class GrantedItemRedeemView(APIView):
+    """The requester enters the envelope the owner sent them.
+
+    The envelope is checked against the stored hash, opened with the
+    requester's private key (unlocked with their password), and the item key
+    is then kept encrypted for them. Throttled: guessing envelopes is the
+    obvious attack.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "redeem"
+
+    def post(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        serializer = RedeemSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            redeem_item(item, password, serializer.validated_data["envelope"])
+        except ValueError as exc:
+            if isinstance(exc, IntegrityError):
+                raise
+            raise ValidationError({"envelope": str(exc)})
+        return Response({"item_id": item.pk, "kind": item.kind, "redeemed": True})
+
+
+class GrantedItemOpenView(APIView):
+    """The requester opens a redeemed item: the record (``?inline=1`` for a
+    preview) or the profile snapshot as JSON. Needs their password."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        label, data = open_item(item, password)
+        if item.kind == GRANT_KIND_PROFILE:
+            return Response(json.loads(data))
+        content_type = label.get("content_type", "")
+        filename = label.get("name") or f"record-{item.pk}"
+        response = file_response(data, content_type, filename, inline=_wants_inline(request))
+        response["X-Content-Type"] = content_type
+        return response

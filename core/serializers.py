@@ -339,7 +339,12 @@ class ApproveRequestSerializer(serializers.Serializer):
         return attrs
 
 
+class RedeemSerializer(serializers.Serializer):
+    envelope = serializers.CharField(max_length=2000, trim_whitespace=True)
+
+
 __all__ = [
+    "RedeemSerializer",
     "ApproveRequestSerializer",
     "AccessRequestCreateSerializer",
     "AccessRequestSerializer",

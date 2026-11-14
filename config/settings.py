@@ -138,6 +138,7 @@ REST_FRAMEWORK = {
         'share': env('THROTTLE_SHARE', default='20/min'),
         'keygen': env('THROTTLE_KEYGEN', default='10/min'),
         'request': env('THROTTLE_REQUEST', default='10/min'),
+        'redeem': env('THROTTLE_REDEEM', default='10/min'),
     },
 }
 

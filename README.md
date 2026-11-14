@@ -313,6 +313,8 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (kept as `CANCELLED`); 404 if you're not part of the request, 409 if it's no longer pending |
 | POST | `/api/access-requests/{id}/approve/` | Owner grants a pending request (`file_ids`, `include_profile`, `expires_hours` 1-168); needs the password; returns one envelope per item (the item key encrypted with the requester's RSA public key) and the requester's key fingerprint; 409 if the requester has no encryption key yet |
 | GET | `/api/access-requests/{id}/items/{item_id}/envelope/` | Owner shows an item's envelope again (the same text); needs the password |
+| POST | `/api/access-requests/{id}/items/{item_id}/redeem/` | Requester enters the envelope (`envelope`); needs their password; 400 malformed or for another item, 403 not this item's envelope, 409 can't be opened; throttled |
+| GET | `/api/access-requests/{id}/items/{item_id}/?inline=1` | Requester opens a redeemed item: the record, or the profile snapshot as JSON; needs their password; 404 after expiry or revocation |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 

@@ -48,6 +48,22 @@ class RequesterHasNoKey(APIException):
     default_code = "requester_has_no_key"
 
 
+class EnvelopeMismatch(APIException):
+    """A pasted envelope is well formed but isn't the one made for this item."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "This key is not for this item."
+    default_code = "envelope_mismatch"
+
+
+class NotRedeemed(APIException):
+    """The requester hasn't entered the key for this item yet."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "Enter the key the owner sent you first."
+    default_code = "not_redeemed"
+
+
 def exception_handler(exc, context):
     """DRF's handler, plus :class:`IntegrityError` -> HTTP 409."""
 
