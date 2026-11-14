@@ -179,6 +179,29 @@ file name and bytes together, so the doctor sees only who shared what kind of
 record until they enter the key. Shares expire (1 hour to 1 week), can be
 revoked, count how often they were opened, and the open endpoint is throttled.
 
+## User key pairs
+
+Every account (patient or doctor) can have **RSA key pairs**, one active pair
+per purpose: `ENCRYPTION` (the public key encrypts keys of records shared with
+the user) and `SIGNING` (the private key signs the user's PDFs). A pair is
+generated on first use and can be rotated; the old pair stays, inactive.
+
+| Item | Value |
+| --- | --- |
+| Algorithm | RSA-3072, public exponent 65537 (`cryptography`) |
+| Fingerprint | SHA-256 of the DER public key, shown as `AB:CD:...` |
+| Private key at rest | PKCS#8, encrypted with **AES-256-GCM**; never stored in the clear |
+| Key-encryption key | PBKDF2-HMAC-SHA256 of the user's password, 600,000 rounds, random 16-byte salt per pair |
+| Associated data | `cipher-safe/keypair:<user id>:<purpose>`, so a stored key can't be moved to another user or purpose |
+| In use | Decrypted in memory, for one request, with the password the client sends |
+
+Granted access ends after the chosen period (1 hour to 1 week): every item
+endpoint then returns 404. `python manage.py purge_expired_grants` deletes the
+expired copies and keys; run it regularly (e.g. from cron).
+
+Changing the password would need every private key re-wrapped; there is no
+password change, so this is a known limitation.
+
 ## Setup
 
 ### 1. Create `.env` and generate its secrets
@@ -271,6 +294,9 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | POST | `/api/auth/refresh/` | Exchange a refresh token for a new pair |
 | POST | `/api/auth/logout/` | Blacklist the supplied refresh token |
 | GET | `/api/me/` | Current user |
+| GET | `/api/me/keys/` | My active key pairs: purpose, algorithm, fingerprint, public key (never the private key) |
+| POST | `/api/me/keys/` | Generate a pair (`purpose`: `ENCRYPTION` or `SIGNING`; `rotate`: replace the active one); needs the password; 201 new, 200 existing |
+| GET | `/api/users/{username}/public-key/?purpose=ENCRYPTION` | Another user's active public key and fingerprint; 404 if they have none |
 | GET | `/api/me/personal-data/?algorithm=AES` | Decrypt the patient profile |
 | PUT | `/api/me/personal-data/` | Replace the patient profile (encrypted with AES/DES/RC4) |
 | GET | `/api/files/?category=VIDEO` | List files (metadata only) |
@@ -285,6 +311,14 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | DELETE | `/api/shares/{id}/` | Patient: stop sharing |
 | GET | `/api/shares/received/` | Doctor: unexpired records shared with me (name stays encrypted) |
 | GET | `/api/shares/received/{id}/open/?inline=1` | Doctor: decrypt with the `X-Share-Key` header |
+| POST | `/api/access-requests/` | Ask a user for their data (`owner`, optional `message`, `category`: a record category or `PROFILE`); any role to any role; one pending request per pair |
+| GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first; approved ones list their `items` (id, kind, category, redeemed, access count; never names or content) |
+| POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |
+| DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (`CANCELLED`); owner revokes an approved one (`REVOKED`, every granted copy and key deleted); 404 if you're not part of the request, 409 if the status doesn't allow it |
+| POST | `/api/access-requests/{id}/approve/` | Owner grants a pending request (`file_ids`, `include_profile`, `expires_hours` 1-168); needs the password; returns one envelope per item (the item key encrypted with the requester's RSA public key), with its `file_id` and the requester's key fingerprint; 409 if the requester has no encryption key yet |
+| GET | `/api/access-requests/{id}/items/{item_id}/envelope/` | Owner shows an item's envelope again (the same text); needs the password |
+| POST | `/api/access-requests/{id}/items/{item_id}/redeem/` | Requester enters the envelope (`envelope`); needs their password; 400 malformed or for another item, 403 not this item's envelope, 409 can't be opened; throttled |
+| GET | `/api/access-requests/{id}/items/{item_id}/?inline=1` | Requester opens a redeemed item: the record, or the profile snapshot as JSON; needs their password; 404 after expiry or revocation |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 

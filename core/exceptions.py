@@ -30,6 +30,40 @@ class IntegrityCheckFailed(APIException):
     default_code = "integrity_check_failed"
 
 
+class InvalidTransition(APIException):
+    """An access request can't move from its current status (e.g. denying a
+    request that was already cancelled)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "This request can't be changed any more."
+    default_code = "invalid_transition"
+
+
+class RequesterHasNoKey(APIException):
+    """The requester has no encryption key pair yet, so nothing can be
+    encrypted for them. The server can't make one without their password."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "The requester has no encryption key yet. Ask them to open Cipher Safe once."
+    default_code = "requester_has_no_key"
+
+
+class EnvelopeMismatch(APIException):
+    """A pasted envelope is well formed but isn't the one made for this item."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "This key is not for this item."
+    default_code = "envelope_mismatch"
+
+
+class NotRedeemed(APIException):
+    """The requester hasn't entered the key for this item yet."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "Enter the key the owner sent you first."
+    default_code = "not_redeemed"
+
+
 def exception_handler(exc, context):
     """DRF's handler, plus :class:`IntegrityError` -> HTTP 409."""
 

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 
 from django.contrib.auth import authenticate
+from django.db import IntegrityError as DatabaseIntegrityError
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.http import content_disposition_header
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -17,18 +20,45 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
+from .constants import (
+    KEY_PURPOSE_CHOICES,
+    KEY_PURPOSE_ENCRYPTION,
+    GRANT_KIND_PROFILE,
+    PREVIEWABLE_TYPES,
+    REQUEST_APPROVED,
+    REQUEST_PENDING,
+    ROLE_DOCTOR,
+    ROLE_PATIENT,
+    SUPPORTED_ALGORITHMS,
+)
 from .crypto import IntegrityError
-from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
+from .models import (
+    AccessRequest,
+    GrantedItem,
+    DownloadEvent,
+    FileCiphertext,
+    FileShare,
+    PersonalData,
+    StoredFile,
+    User,
+    UserKeyPair,
+)
 from .serializers import (
+    ApproveRequestSerializer,
+    AccessRequestCreateSerializer,
+    AccessRequestSerializer,
     PII_FIELDS,
     DownloadEventSerializer,
     FileShareSerializer,
     ReceivedShareSerializer,
     ShareCreateSerializer,
     FileUploadSerializer,
+    KeyPairCreateSerializer,
+    KeyPairSerializer,
     LoginSerializer,
     PersonalDataSerializer,
+    PublicKeySerializer,
+    RedeemSerializer,
     RegisterSerializer,
     StoredFileSerializer,
     UserSerializer,
@@ -37,12 +67,21 @@ from .services import (
     create_share,
     decrypt_file,
     delete_share,
+    ensure_key_pair,
+    envelope_for_owner,
     open_share,
     decrypt_file_label,
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
+    open_item,
+    redeem_item,
+    revoke_request,
+    rotate_key_pair,
+    approve_request,
     benchmark_decryption,
+    cancel_request,
+    deny_request,
     store_personal_data,
     store_record,
     timing_summary,
@@ -507,4 +546,266 @@ class ReceivedShareOpenView(APIView):
             inline=_wants_inline(request),
         )
         response["X-Content-Type"] = label.get("content_type", "")
+        return response
+
+
+class MyKeyPairsView(APIView):
+    """List the signed-in user's active key pairs, or generate / rotate one.
+
+    Any account (patient or doctor) has key pairs. Generating needs the
+    password, because the new private key is encrypted with it. Throttled:
+    RSA-3072 generation is expensive.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "keygen"
+
+    def get_throttles(self):
+        # Listing is cheap; only generation is rate-limited.
+        return super().get_throttles() if self.request.method == "POST" else []
+
+    def get(self, request):
+        pairs = UserKeyPair.objects.filter(user=request.user, active=True).order_by("purpose")
+        return Response(KeyPairSerializer(pairs, many=True).data)
+
+    def post(self, request):
+        password = require_password(request)
+        serializer = KeyPairCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        purpose = serializer.validated_data["purpose"]
+        if serializer.validated_data["rotate"]:
+            pair, created = rotate_key_pair(request.user, purpose, password), True
+        else:
+            pair, created = ensure_key_pair(request.user, purpose, password)
+        return Response(
+            KeyPairSerializer(pair).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class UserPublicKeyView(APIView):
+    """Another user's active public key and fingerprint (``?purpose=``, default
+    ``ENCRYPTION``). Never generates a key for someone else: 404 if they have none."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username: str):
+        purpose = (request.query_params.get("purpose") or KEY_PURPOSE_ENCRYPTION).upper()
+        if purpose not in dict(KEY_PURPOSE_CHOICES):
+            raise ValidationError({"purpose": f"Must be one of {', '.join(dict(KEY_PURPOSE_CHOICES))}."})
+        owner = get_object_or_404(User, username=username)
+        pair = get_object_or_404(UserKeyPair, user=owner, purpose=purpose, active=True)
+        return Response(PublicKeySerializer(pair).data)
+
+
+class AccessRequestListCreateView(APIView):
+    """Ask another user for their data, or list my requests.
+
+    ``?box=incoming`` (default): requests to me. ``?box=outgoing``: requests I
+    sent. Any role can ask any other user. No password: nothing is decrypted.
+    Creating is throttled so a user can't flood someone's inbox.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "request"
+
+    def get_throttles(self):
+        return super().get_throttles() if self.request.method == "POST" else []
+
+    def get(self, request):
+        box = (request.query_params.get("box") or "incoming").lower()
+        if box == "incoming":
+            requests = AccessRequest.objects.filter(owner=request.user)
+        elif box == "outgoing":
+            requests = AccessRequest.objects.filter(requester=request.user)
+        else:
+            raise ValidationError({"box": "Must be incoming or outgoing."})
+        requests = requests.select_related("requester", "owner").prefetch_related(
+            "items__file", "items__shared_key"
+        )
+        return Response(AccessRequestSerializer(requests, many=True).data)
+
+    def post(self, request):
+        serializer = AccessRequestCreateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                access_request = serializer.save()
+        except DatabaseIntegrityError:
+            # Two requests raced past the pending check; the constraint caught it.
+            raise ValidationError({"owner": "You already have a pending request to this user."})
+        return Response(AccessRequestSerializer(access_request).data, status=status.HTTP_201_CREATED)
+
+
+def _request_for(user, pk: int) -> AccessRequest:
+    """A request the user is part of. Anyone else gets 404, so ids don't leak."""
+
+    return get_object_or_404(
+        AccessRequest.objects.select_related("requester", "owner").filter(Q(requester=user) | Q(owner=user)),
+        pk=pk,
+    )
+
+
+class AccessRequestDetailView(APIView):
+    """``DELETE`` ends a request; the row is kept with its new status.
+
+    * The requester cancels a pending request (``CANCELLED``).
+    * The owner revokes an approved one (``REVOKED``): every granted copy and
+      its keys are deleted. A pending request is denied instead, not revoked.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk: int):
+        access_request = _request_for(request.user, pk)
+        if access_request.requester_id == request.user.pk:
+            cancel_request(access_request)
+        elif access_request.status == REQUEST_PENDING:
+            raise PermissionDenied("Only the requester can cancel a request; deny it instead.")
+        else:
+            revoke_request(access_request)  # 409 unless it is approved
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AccessRequestDenyView(APIView):
+    """The owner refuses a pending request."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        access_request = _request_for(request.user, pk)
+        if access_request.owner_id != request.user.pk:
+            raise PermissionDenied("Only the owner can deny a request.")
+        return Response(AccessRequestSerializer(deny_request(access_request)).data)
+
+
+def _owned_request(user, pk: int) -> AccessRequest:
+    """A request where ``user`` is the owner. Outsiders get 404, the requester 403."""
+
+    access_request = _request_for(user, pk)
+    if access_request.owner_id != user.pk:
+        raise PermissionDenied("Only the owner can do this.")
+    return access_request
+
+
+def _live_item(access_request: AccessRequest, item_id: int) -> GrantedItem:
+    """An item of an approved, unexpired request; 404 otherwise."""
+
+    if access_request.status != REQUEST_APPROVED or access_request.expired:
+        raise NotFound("This access has ended.")
+    items = GrantedItem.objects.select_related("shared_key__requester_key")
+    return get_object_or_404(items, request=access_request, pk=item_id)
+
+
+class AccessRequestApproveView(APIView):
+    """The owner grants a pending request.
+
+    Each chosen record (and optionally the profile) gets its own random AES-256
+    key and encrypted copy; each key is encrypted with the requester's RSA
+    public key. The response holds those envelopes for the owner to send out
+    of band. Needs the owner's password to decrypt what is granted.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        access_request = _owned_request(request.user, pk)
+        serializer = ApproveRequestSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        approved, requester_pair, grants = approve_request(
+            access_request, password, data["file_ids"], data["include_profile"], data["expires_hours"]
+        )
+        return Response(
+            {
+                "request": AccessRequestSerializer(approved).data,
+                "recipient_fingerprint": requester_pair.fingerprint,
+                "items": [
+                    {
+                        "item_id": item.pk,
+                        "kind": item.kind,
+                        "file_id": item.file_id,
+                        "category": item.file.category if item.file else None,
+                        "envelope": envelope,
+                    }
+                    for item, envelope in grants
+                ],
+            }
+        )
+
+
+class GrantedItemEnvelopeView(APIView):
+    """The owner shows an item's envelope again: the same text as at approval,
+    so a copy already sent keeps working. Needs the owner's password."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _live_item(_owned_request(request.user, pk), item_id)
+        return Response(
+            {
+                "item_id": item.pk,
+                "kind": item.kind,
+                "envelope": envelope_for_owner(item, password),
+                "recipient_fingerprint": item.shared_key.requester_key.fingerprint,
+            }
+        )
+
+
+def _requested_item(user, pk: int, item_id: int) -> GrantedItem:
+    """An item of a live request where ``user`` is the requester."""
+
+    access_request = _request_for(user, pk)
+    if access_request.requester_id != user.pk:
+        raise PermissionDenied("Only the requester can do this.")
+    return _live_item(access_request, item_id)
+
+
+class GrantedItemRedeemView(APIView):
+    """The requester enters the envelope the owner sent them.
+
+    The envelope is checked against the stored hash, opened with the
+    requester's private key (unlocked with their password), and the item key
+    is then kept encrypted for them. Throttled: guessing envelopes is the
+    obvious attack.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "redeem"
+
+    def post(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        serializer = RedeemSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            redeem_item(item, password, serializer.validated_data["envelope"])
+        except ValueError as exc:
+            if isinstance(exc, IntegrityError):
+                raise
+            raise ValidationError({"envelope": str(exc)})
+        return Response({"item_id": item.pk, "kind": item.kind, "redeemed": True})
+
+
+class GrantedItemOpenView(APIView):
+    """The requester opens a redeemed item: the record (``?inline=1`` for a
+    preview) or the profile snapshot as JSON. Needs their password."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        label, data = open_item(item, password)
+        if item.kind == GRANT_KIND_PROFILE:
+            return Response(json.loads(data))
+        content_type = label.get("content_type", "")
+        filename = label.get("name") or f"record-{item.pk}"
+        response = file_response(data, content_type, filename, inline=_wants_inline(request))
+        response["X-Content-Type"] = content_type
         return response

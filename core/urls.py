@@ -12,6 +12,8 @@ urlpatterns = [
     # Account
     path("me/", views.MeView.as_view(), name="me"),
     path("me/personal-data/", views.PersonalDataView.as_view(), name="personal-data"),
+    path("me/keys/", views.MyKeyPairsView.as_view(), name="my-keys"),
+    path("users/<str:username>/public-key/", views.UserPublicKeyView.as_view(), name="user-public-key"),
     # Files
     path("files/", views.FileListCreateView.as_view(), name="file-list"),
     path("files/<int:pk>/", views.FileDetailView.as_view(), name="file-detail"),
@@ -25,6 +27,25 @@ urlpatterns = [
     path("shares/received/", views.ReceivedShareListView.as_view(), name="shares-received"),
     path("shares/received/<int:pk>/open/", views.ReceivedShareOpenView.as_view(), name="share-open"),
     # Analysis
+    path("access-requests/", views.AccessRequestListCreateView.as_view(), name="access-requests"),
+    path("access-requests/<int:pk>/", views.AccessRequestDetailView.as_view(), name="access-request-detail"),
+    path("access-requests/<int:pk>/deny/", views.AccessRequestDenyView.as_view(), name="access-request-deny"),
+    path(
+        "access-requests/<int:pk>/approve/",
+        views.AccessRequestApproveView.as_view(),
+        name="access-request-approve",
+    ),
+    path(
+        "access-requests/<int:pk>/items/<int:item_id>/envelope/",
+        views.GrantedItemEnvelopeView.as_view(),
+        name="granted-item-envelope",
+    ),
+    path(
+        "access-requests/<int:pk>/items/<int:item_id>/redeem/",
+        views.GrantedItemRedeemView.as_view(),
+        name="granted-item-redeem",
+    ),
+    path("access-requests/<int:pk>/items/<int:item_id>/", views.GrantedItemOpenView.as_view(), name="granted-item"),
     path("analysis/downloads/", views.DownloadHistoryView.as_view(), name="download-history"),
     path("analysis/timings/", views.TimingAnalysisView.as_view(), name="timing-analysis"),
 ]

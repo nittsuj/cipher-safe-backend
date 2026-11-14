@@ -9,8 +9,22 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 
-from .constants import FILE_CATEGORY_CHOICES, ROLE_DOCTOR
-from .models import DownloadEvent, FileCiphertext, FileShare, StoredFile
+from .constants import (
+    FILE_CATEGORY_CHOICES,
+    KEY_PURPOSE_CHOICES,
+    REQUEST_CATEGORY_CHOICES,
+    REQUEST_PENDING,
+    ROLE_DOCTOR,
+)
+from .models import (
+    AccessRequest,
+    DownloadEvent,
+    FileCiphertext,
+    FileShare,
+    GrantedItem,
+    StoredFile,
+    UserKeyPair,
+)
 
 User = get_user_model()
 
@@ -228,7 +242,145 @@ class ReceivedShareSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class KeyPairSerializer(serializers.ModelSerializer):
+    """One of the user's own key pairs: public parts only.
+
+    The field list is an allowlist; the encrypted private key, its salt and
+    nonce never leave the server.
+    """
+
+    has_certificate = serializers.SerializerMethodField()
+
+    def get_has_certificate(self, obj) -> bool:
+        return bool(obj.certificate_pem)
+
+    class Meta:
+        model = UserKeyPair
+        fields = ["purpose", "algorithm", "fingerprint", "public_key_pem", "has_certificate", "created_at"]
+        read_only_fields = fields
+
+
+class KeyPairCreateSerializer(serializers.Serializer):
+    purpose = serializers.ChoiceField(choices=KEY_PURPOSE_CHOICES)
+    rotate = serializers.BooleanField(default=False)
+
+
+class PublicKeySerializer(serializers.ModelSerializer):
+    """Another user's active public key, for encrypting data to them."""
+
+    username = serializers.CharField(source="user.username", read_only=True)
+
+    class Meta:
+        model = UserKeyPair
+        fields = ["username", "purpose", "algorithm", "fingerprint", "public_key_pem"]
+        read_only_fields = fields
+
+
+class GrantedItemSummarySerializer(serializers.ModelSerializer):
+    """What was granted on an approved request, without names or content."""
+
+    item_id = serializers.IntegerField(source="pk", read_only=True)
+    category = serializers.CharField(source="file.category", default=None, read_only=True)
+    redeemed = serializers.SerializerMethodField()
+
+    def get_redeemed(self, obj) -> bool:
+        shared_key = getattr(obj, "shared_key", None)
+        return bool(shared_key and shared_key.redeemed)
+
+    class Meta:
+        model = GrantedItem
+        fields = ["item_id", "kind", "category", "redeemed", "access_count"]
+        read_only_fields = fields
+
+
+class AccessRequestSerializer(serializers.ModelSerializer):
+    """A request as both sides see it. Before approval it says nothing about
+    the owner's records; once approved, ``items`` lists what was granted (kind
+    and category only), so the requester knows which keys to enter."""
+
+    requester = serializers.CharField(source="requester.username", read_only=True)
+    owner = serializers.CharField(source="owner.username", read_only=True)
+    expired = serializers.BooleanField(read_only=True)
+    items = GrantedItemSummarySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AccessRequest
+        fields = [
+            "id",
+            "requester",
+            "owner",
+            "message",
+            "category",
+            "status",
+            "created_at",
+            "decided_at",
+            "expires_at",
+            "expired",
+            "items",
+        ]
+        read_only_fields = fields
+
+
+class AccessRequestCreateSerializer(serializers.Serializer):
+    owner = serializers.CharField(help_text="Username of the user whose data you ask for.")
+    message = serializers.CharField(max_length=500, required=False, allow_blank=True, default="")
+    category = serializers.ChoiceField(
+        choices=REQUEST_CATEGORY_CHOICES, required=False, allow_blank=True, default=""
+    )
+
+    def validate_owner(self, value):
+        owner = User.objects.filter(username=value).first()
+        if owner is None:
+            raise serializers.ValidationError("No user with that username.")
+        if owner == self.context["request"].user:
+            raise serializers.ValidationError("You can't request your own data.")
+        return owner
+
+    def validate(self, attrs):
+        requester = self.context["request"].user
+        if AccessRequest.objects.filter(requester=requester, owner=attrs["owner"], status=REQUEST_PENDING).exists():
+            raise serializers.ValidationError({"owner": "You already have a pending request to this user."})
+        return attrs
+
+    def create(self, validated_data):
+        return AccessRequest.objects.create(requester=self.context["request"].user, **validated_data)
+
+
+class ApproveRequestSerializer(serializers.Serializer):
+    """What the owner grants: some of their records and/or a profile snapshot."""
+
+    file_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False, default=list)
+    include_profile = serializers.BooleanField(default=False)
+    expires_hours = serializers.IntegerField(min_value=1, max_value=168, default=24)
+
+    def validate_file_ids(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("A record is listed twice.")
+        owner = self.context["request"].user
+        files = list(StoredFile.objects.filter(owner=owner, pk__in=value))
+        if len(files) != len(value):
+            raise serializers.ValidationError("Every record must be one of yours.")
+        return files
+
+    def validate(self, attrs):
+        if not attrs["file_ids"] and not attrs["include_profile"]:
+            raise serializers.ValidationError("Choose at least one record or the profile.")
+        return attrs
+
+
+class RedeemSerializer(serializers.Serializer):
+    envelope = serializers.CharField(max_length=2000, trim_whitespace=True)
+
+
 __all__ = [
+    "GrantedItemSummarySerializer",
+    "RedeemSerializer",
+    "ApproveRequestSerializer",
+    "AccessRequestCreateSerializer",
+    "AccessRequestSerializer",
+    "KeyPairCreateSerializer",
+    "KeyPairSerializer",
+    "PublicKeySerializer",
     "PII_FIELDS",
     "FileShareSerializer",
     "ReceivedShareSerializer",
