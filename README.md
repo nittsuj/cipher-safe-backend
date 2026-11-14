@@ -335,6 +335,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/access-requests/{id}/items/{item_id}/envelope/` | Owner shows an item's envelope again (the same text); needs the password |
 | POST | `/api/access-requests/{id}/items/{item_id}/redeem/` | Requester enters the envelope (`envelope`); needs their password; 400 malformed or for another item, 403 not this item's envelope, 409 can't be opened; throttled |
 | GET | `/api/access-requests/{id}/items/{item_id}/?inline=1` | Requester opens a redeemed item: the record, or the profile snapshot as JSON; needs their password; 404 after expiry or revocation |
+| GET | `/api/access-requests/{id}/items/{item_id}/signature/` | Requester checks a redeemed shared PDF's signature against the owner's certificates (same fields as the record check); needs their password; doesn't count as an access; 400 if not a PDF |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 

@@ -73,6 +73,7 @@ from .services import (
     revoke_request,
     sign_pdf_for,
     sign_stored_pdf,
+    verify_shared_item,
     verify_stored_file,
     rotate_key_pair,
     approve_request,
@@ -806,3 +807,18 @@ class UserCertificateView(APIView):
         owner = get_object_or_404(User, username=username)
         pair = UserKeyPair.objects.filter(user=owner, purpose=KEY_PURPOSE_SIGNING, active=True).first()
         return certificate_response(pair, owner.username)
+
+
+class GrantedItemSignatureView(APIView):
+    """The requester checks a shared PDF's signature, against the owner's
+    certificates. Needs their password; 400 for anything that isn't a PDF."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        try:
+            return Response(verify_shared_item(item, password))
+        except NotAPdf as exc:
+            raise ValidationError({"file": str(exc)})

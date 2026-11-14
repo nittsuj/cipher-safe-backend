@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from django.db import IntegrityError as DatabaseIntegrityError
 from django.db.models import ProtectedError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
+from django.utils import timezone
 from pyhanko.pdf_utils import generic
 from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.reader import PdfFileReader
@@ -28,8 +30,8 @@ from ..crypto import (
     generate_rsa_key_pair,
     load_certificate,
 )
-from ..models import PdfSignature, StoredFile, User, UserKeyPair
-from ..services import ensure_key_pair
+from ..models import AccessRequest, GrantedItem, PdfSignature, PersonalData, StoredFile, User, UserKeyPair
+from ..services import ensure_key_pair, store_personal_data
 from ..signing import SIGNATURE_FIELD, AlreadySigned, EncryptedPdf, NotAPdf, is_pdf, sign_pdf, verify_pdf
 from .base import PASSWORD, AuthenticatedApiTestCase
 
@@ -406,3 +408,68 @@ class SignatureStatusApiTests(PdfUploadHelpers):
         login = self.client.post("/api/auth/login/", {"username": "citra", "password": PASSWORD}, format="json")
         self._auth(access=login.json()["access"])
         self.assertEqual(self._status(file_id).status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SharedPdfSignatureTests(PdfUploadHelpers):
+    """GET /api/access-requests/{id}/items/{item_id}/signature/ (requester)."""
+
+    def setUp(self):
+        super().setUp()
+        self.budi = User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        ensure_key_pair(self.budi, "ENCRYPTION", PASSWORD)
+        self.alice = User.objects.get(username="alice")
+
+    def _share(self, file_id, include_profile=False):
+        """alice grants ``file_id`` to budi; budi redeems everything. Returns (request id, items)."""
+        request_id = AccessRequest.objects.create(requester=self.budi, owner=self.alice).pk
+        items = self.client.post(
+            f"/api/access-requests/{request_id}/approve/",
+            {"file_ids": [file_id], "include_profile": include_profile},
+            format="json",
+        ).json()["items"]
+        self._as("budi")
+        for item in items:
+            url = f"/api/access-requests/{request_id}/items/{item['item_id']}/redeem/"
+            self.assertEqual(self.client.post(url, {"envelope": item["envelope"]}, format="json").status_code, 200)
+        return request_id, items
+
+    def _as(self, username):
+        login = self.client.post("/api/auth/login/", {"username": username, "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+
+    def _check(self, request_id, item):
+        return self.client.get(f"/api/access-requests/{request_id}/items/{item['item_id']}/signature/")
+
+    def test_signed_pdf_is_valid_for_the_owner_when_checked_by_the_requester(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        body = self._check(request_id, item).json()
+        self.assertEqual(body["status"], "valid")
+        self.assertEqual(body["signer"]["common_name"], "alice")
+        self.assertEqual(GrantedItem.objects.get(pk=item["item_id"]).access_count, 0)  # checking isn't opening
+
+    def test_pdf_shared_before_signing_stays_unsigned(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        request_id, [item] = self._share(file_id)
+        self._as("alice")
+        self.client.post(f"/api/files/{file_id}/sign/")  # signed after it was shared
+        self._as("budi")
+        self.assertEqual(self._check(request_id, item).json()["status"], "unsigned")
+
+    def test_profile_item_is_400(self):
+        store_personal_data(PersonalData.objects.create(owner=self.alice), PASSWORD, {"full_name": "Alice"})
+        request_id, items = self._share(self._upload_pdf().json()["id"], include_profile=True)
+        profile = next(i for i in items if i["kind"] == "PROFILE")
+        self.assertEqual(self._check(request_id, profile).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_owner_and_outsiders_cannot_use_it(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        self._as("alice")
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_403_FORBIDDEN)
+        User.objects.create_user("citra", password=PASSWORD)
+        self._as("citra")
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_not_after_access_ends(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        AccessRequest.objects.filter(pk=request_id).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_404_NOT_FOUND)

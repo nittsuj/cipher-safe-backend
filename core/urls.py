@@ -45,6 +45,11 @@ urlpatterns = [
         views.GrantedItemRedeemView.as_view(),
         name="granted-item-redeem",
     ),
+    path(
+        "access-requests/<int:pk>/items/<int:item_id>/signature/",
+        views.GrantedItemSignatureView.as_view(),
+        name="granted-item-signature",
+    ),
     path("access-requests/<int:pk>/items/<int:item_id>/", views.GrantedItemOpenView.as_view(), name="granted-item"),
     path("analysis/downloads/", views.DownloadHistoryView.as_view(), name="download-history"),
     path("analysis/timings/", views.TimingAnalysisView.as_view(), name="timing-analysis"),

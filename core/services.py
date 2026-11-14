@@ -597,12 +597,12 @@ def redeem_item(item: GrantedItem, requester_password: str, envelope_text: str) 
     return item
 
 
-def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
-    """Decrypt a redeemed item for the requester.
+def decrypt_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a redeemed item for the requester, without counting an access.
 
     Returns ``(label, data)``: for a record its name, type and bytes; for a
     profile snapshot ``{"name": "profile.json", "content_type": "application/json"}``
-    and the JSON. Counts the access.
+    and the JSON.
     """
 
     shared_key = item.shared_key
@@ -612,13 +612,33 @@ def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str
     salt = bytes(shared_key.requester_salt)
     key = open_key_for_user(sealed, salt, requester_password, shared_key.aad("requester"))
     payload = decrypt_with_key(item.sealed(), key, item.aad)
-    GrantedItem.objects.filter(pk=item.pk).update(
-        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
-    )
     if item.kind == GRANT_KIND_PROFILE:
         return {"name": "profile.json", "content_type": "application/json"}, payload
     return unpack_share_payload(payload)
 
+
+def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a redeemed item for the requester and count the access."""
+
+    label, data = decrypt_item(item, requester_password)
+    GrantedItem.objects.filter(pk=item.pk).update(
+        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
+    )
+    return label, data
+
+
+def verify_shared_item(item: GrantedItem, requester_password: str) -> dict:
+    """Check a shared PDF's signature against the **owner's** certificates.
+
+    A shared copy is a snapshot from approval time: it carries a signature only
+    if the PDF was signed before it was shared. Checking doesn't count as an
+    access. Raises ``NotAPdf`` for a profile snapshot or another file type.
+    """
+
+    if item.kind == GRANT_KIND_PROFILE:
+        raise NotAPdf("Only PDFs have signatures.")
+    _, data = decrypt_item(item, requester_password)
+    return verify_pdf_bytes(item.request.owner, data)
 
 
 # ------------------------------------------------- ending access
