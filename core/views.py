@@ -30,6 +30,8 @@ from .constants import (
     ROLE_PATIENT,
     SUPPORTED_ALGORITHMS,
 )
+from .exceptions import Conflict
+from .signing import AlreadySigned, PdfSigningError
 from .crypto import IntegrityError, certificate_der, load_certificate
 from .models import (
     AccessRequest,
@@ -69,6 +71,7 @@ from .services import (
     open_item,
     redeem_item,
     revoke_request,
+    sign_pdf_for,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -298,6 +301,12 @@ class FileListCreateView(APIView):
             raise ValidationError({"file": "The uploaded file is empty."})
 
         label = {"name": upload.name, "content_type": getattr(upload, "content_type", "") or ""}
+        signature = None
+        if serializer.validated_data["sign"]:
+            # Sign first, then encrypt the signed bytes (the signature survives
+            # decryption, download and sharing).
+            signature = sign_or_error(request.user, data, label["content_type"], password)
+            data = signature.data
         stored_file = store_record(
             request.user,
             serializer.validated_data["category"],
@@ -305,12 +314,25 @@ class FileListCreateView(APIView):
             label["content_type"],
             data,
             password,
+            signature=signature,
         )
         stored_file.refresh_from_db()
         return Response(
             StoredFileSerializer(stored_file, context={"labels": {stored_file.pk: label}}).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+def sign_or_error(user, data: bytes, content_type: str, password: str):
+    """Sign a PDF, turning signing problems into API errors: 400 for a file
+    that can't be signed, 409 for one already signed."""
+
+    try:
+        return sign_pdf_for(user, data, content_type, password)
+    except AlreadySigned as exc:
+        raise Conflict(str(exc))
+    except PdfSigningError as exc:
+        raise ValidationError({"file": str(exc)})
 
 
 class FileDetailView(APIView):

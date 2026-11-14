@@ -181,6 +181,8 @@ class StoredFileSerializer(serializers.ModelSerializer):
 class FileUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
     category = serializers.ChoiceField(choices=FILE_CATEGORY_CHOICES)
+    #: Sign the PDF with the uploader's signing key before it is encrypted.
+    sign = serializers.BooleanField(default=False)
 
     def validate_file(self, value):
         if value.size > settings.MAX_UPLOAD_BYTES:

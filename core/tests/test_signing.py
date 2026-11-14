@@ -6,14 +6,16 @@ from pathlib import Path
 from asn1crypto import x509 as asn1_x509
 from django.db import IntegrityError as DatabaseIntegrityError
 from django.db.models import ProtectedError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign.validation import validate_pdf_signature
 from pyhanko_certvalidator import ValidationContext
+from rest_framework import status
 
 from ..constants import KEY_PURPOSE_SIGNING
-from ..crypto import build_signing_certificate, certificate_der, generate_rsa_key_pair
-from ..models import PdfSignature, User
+from ..crypto import build_signing_certificate, certificate_der, generate_rsa_key_pair, load_certificate
+from ..models import PdfSignature, StoredFile, User, UserKeyPair
 from ..services import ensure_key_pair
 from ..signing import SIGNATURE_FIELD, AlreadySigned, EncryptedPdf, NotAPdf, is_pdf, sign_pdf
 from .base import PASSWORD, AuthenticatedApiTestCase
@@ -131,3 +133,73 @@ class PdfSignatureRecordTests(AuthenticatedApiTestCase):
         PdfSignature.objects.create(file_id=self.file_id, key_pair=self.pair, signer_fingerprint="x")
         self.client.delete(f"/api/files/{self.file_id}/")
         self.assertFalse(PdfSignature.objects.exists())
+
+
+class SignOnUploadTests(AuthenticatedApiTestCase):
+    """POST /api/files/ with ``sign=true``."""
+
+    def _upload_pdf(self, data=SAMPLE, sign=True, content_type="application/pdf", name="lab.pdf"):
+        upload = SimpleUploadedFile(name, data, content_type=content_type)
+        body = {"file": upload, "category": "DOCUMENT"}
+        if sign:
+            body["sign"] = "true"
+        return self.client.post("/api/files/", body, format="multipart")
+
+    def _download(self, file_id, algorithm):
+        response = self.client.get(f"/api/files/{file_id}/download/", {"algorithm": algorithm})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        return response.content
+
+    def test_signed_upload_stores_the_signed_pdf_in_every_copy(self):
+        response = self._upload_pdf()
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.json()["signed"])
+        file_id = response.json()["id"]
+
+        copies = {algorithm: self._download(file_id, algorithm) for algorithm in ("AES", "DES", "RC4")}
+        self.assertEqual(len(set(copies.values())), 1)  # all three decrypt to the same signed PDF
+        signed = copies["AES"]
+        self.assertTrue(signed.startswith(SAMPLE))
+        [embedded] = PdfFileReader(BytesIO(signed)).embedded_signatures
+
+        pair = UserKeyPair.objects.get(user__username="alice", purpose=KEY_PURPOSE_SIGNING)
+        trusted = asn1_x509.Certificate.load(certificate_der(load_certificate(pair.certificate_pem)))
+        self.assertTrue(validate_pdf_signature(embedded, ValidationContext(trust_roots=[trusted])).bottom_line)
+        self.assertEqual(PdfSignature.objects.get().signer_fingerprint, pair.fingerprint)
+
+    def test_signing_creates_key_pair_on_first_use(self):
+        self.assertFalse(UserKeyPair.objects.filter(purpose=KEY_PURPOSE_SIGNING).exists())
+        self._upload_pdf()
+        self._upload_pdf()
+        self.assertEqual(UserKeyPair.objects.filter(purpose=KEY_PURPOSE_SIGNING).count(), 1)
+
+    def test_upload_without_sign_is_unchanged(self):
+        response = self._upload_pdf(sign=False)
+        self.assertFalse(response.json()["signed"])
+        self.assertEqual(self._download(response.json()["id"], "AES"), SAMPLE)
+        self.assertFalse(PdfSignature.objects.exists())
+
+    def test_sign_non_pdf_400_and_nothing_stored(self):
+        cases = [
+            {"data": b"plain text", "content_type": "text/plain", "name": "notes.txt"},
+            {"data": b"plain text", "content_type": "application/pdf"},  # says PDF, isn't
+            {"data": SAMPLE, "content_type": "text/plain"},  # is a PDF, but not labelled as one
+        ]
+        for case in cases:
+            with self.subTest(case=case["content_type"]):
+                response = self._upload_pdf(**case)
+                self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn("file", response.json())
+        self.assertFalse(StoredFile.objects.exists())
+
+    def test_already_signed_pdf_is_409(self):
+        signed = self._download(self._upload_pdf().json()["id"], "AES")
+        response = self._upload_pdf(data=signed)
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(StoredFile.objects.count(), 1)
+
+    def test_wrong_password_signs_nothing(self):
+        self._auth(password="not-the-password")
+        self.assertEqual(self._upload_pdf().status_code, status.HTTP_403_FORBIDDEN)
+        self.assertFalse(UserKeyPair.objects.filter(purpose=KEY_PURPOSE_SIGNING).exists())
+        self.assertFalse(StoredFile.objects.exists())

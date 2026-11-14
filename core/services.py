@@ -17,6 +17,7 @@ import logging
 import secrets
 import struct
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
@@ -38,6 +39,7 @@ from .constants import (
     REQUEST_REVOKED,
     SUPPORTED_ALGORITHMS,
 )
+from .signing import NotAPdf, is_pdf, sign_pdf
 from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
@@ -51,6 +53,7 @@ from .crypto import (
     encrypt_with_key,
     envelope_digest,
     format_envelope,
+    load_certificate,
     load_public_key,
     new_salt,
     new_symmetric_key,
@@ -71,6 +74,7 @@ from .models import (
     FileCiphertext,
     FileLabel,
     GrantedItem,
+    PdfSignature,
     PersonalData,
     SharedKey,
     StoredFile,
@@ -141,9 +145,19 @@ def store_file_ciphertexts(stored_file: StoredFile, data: bytes, password: str) 
     return rows
 
 
-def store_record(owner, category: str, name: str, content_type: str, data: bytes, password: str) -> StoredFile:
+def store_record(
+    owner,
+    category: str,
+    name: str,
+    content_type: str,
+    data: bytes,
+    password: str,
+    signature: SignedPdf | None = None,
+) -> StoredFile:
     """Create a record: its row, encrypted label and three encrypted copies.
 
+    With ``signature`` the data is the already **signed** PDF, so what gets
+    encrypted is the signed file, and the signature is recorded alongside.
     Runs in one transaction, so a failure leaves no half-stored record in the
     database.
     """
@@ -152,6 +166,13 @@ def store_record(owner, category: str, name: str, content_type: str, data: bytes
         stored_file = StoredFile.objects.create(owner=owner, category=category, plaintext_size=len(data))
         store_file_label(stored_file, name, content_type, password)
         store_file_ciphertexts(stored_file, data, password)
+        if signature is not None:
+            PdfSignature.objects.create(
+                file=stored_file,
+                key_pair=signature.key_pair,
+                signer_fingerprint=signature.key_pair.fingerprint,
+                sign_ms=signature.sign_ms,
+            )
     return stored_file
 
 
@@ -635,3 +656,33 @@ def purge_expired_grants(now=None) -> int:
     with transaction.atomic():
         expired.delete()
     return count
+
+
+
+# ------------------------------------------------------------ PDF signing
+
+
+@dataclass(frozen=True)
+class SignedPdf:
+    """A PDF signed with a user's signing key, ready to be stored."""
+
+    data: bytes
+    key_pair: UserKeyPair
+    sign_ms: float
+
+
+def sign_pdf_for(user, data: bytes, content_type: str, password: str) -> SignedPdf:
+    """Sign PDF bytes with the user's signing key, creating it the first time.
+
+    Only PDFs are signed: the content type must say so **and** the bytes must
+    start with ``%PDF-``. Raises :class:`core.signing.PdfSigningError`
+    (not a PDF, password-protected, already signed).
+    """
+
+    if content_type != "application/pdf" or not is_pdf(data):
+        raise NotAPdf("Only PDF files can be signed.")
+    pair, _ = ensure_key_pair(user, KEY_PURPOSE_SIGNING, password)
+    private_key = load_private_key(pair, password)
+    signed, sign_ms = sign_pdf(data, private_key, load_certificate(pair.certificate_pem), user.username)
+    key_log.info("sign user=%s pdf_bytes=%d sign_ms=%.3f", user.pk, len(data), sign_ms)
+    return SignedPdf(signed, pair, sign_ms)
