@@ -15,6 +15,7 @@ from .constants import (
     REQUEST_CATEGORY_CHOICES,
     REQUEST_PENDING,
 )
+from .crypto import certificate_fingerprint, load_certificate
 from .models import (
     AccessRequest,
     DownloadEvent,
@@ -206,13 +207,35 @@ class KeyPairSerializer(serializers.ModelSerializer):
     """
 
     has_certificate = serializers.SerializerMethodField()
+    certificate = serializers.SerializerMethodField()
 
     def get_has_certificate(self, obj) -> bool:
         return bool(obj.certificate_pem)
 
+    def get_certificate(self, obj) -> dict | None:
+        """Who the certificate names and how long it's valid; ``None`` without one."""
+
+        if not obj.certificate_pem:
+            return None
+        certificate = load_certificate(obj.certificate_pem)
+        return {
+            "subject": certificate.subject.rfc4514_string(),
+            "not_before": certificate.not_valid_before_utc,
+            "not_after": certificate.not_valid_after_utc,
+            "fingerprint": certificate_fingerprint(certificate),
+        }
+
     class Meta:
         model = UserKeyPair
-        fields = ["purpose", "algorithm", "fingerprint", "public_key_pem", "has_certificate", "created_at"]
+        fields = [
+            "purpose",
+            "algorithm",
+            "fingerprint",
+            "public_key_pem",
+            "has_certificate",
+            "certificate",
+            "created_at",
+        ]
         read_only_fields = fields
 
 
