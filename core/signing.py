@@ -13,7 +13,10 @@ The key and certificate come from :mod:`core.crypto` (generated with
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import time
+from dataclasses import dataclass
 from io import BytesIO
 
 from asn1crypto import keys as asn1_keys
@@ -25,6 +28,9 @@ from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.misc import PdfReadError
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign import fields, signers
+from pyhanko.sign.validation.errors import SignatureValidationError
+from pyhanko.sign.validation import validate_pdf_signature
+from pyhanko_certvalidator import ValidationContext
 from pyhanko_certvalidator.registry import SimpleCertificateStore
 
 #: Name of the signature field Cipher Safe adds.
@@ -32,6 +38,12 @@ SIGNATURE_FIELD = "CipherSafe"
 
 #: Reason shown in the reader's signature panel.
 SIGNATURE_REASON = "Signed in Cipher Safe"
+
+# pyHanko logs a full traceback whenever a self-signed certificate isn't the
+# trust root, and for every incremental update it can't classify. Both are
+# normal here and reported through the result instead.
+for _name in ("pyhanko", "pyhanko_certvalidator"):
+    logging.getLogger(_name).setLevel(logging.CRITICAL)
 
 
 class PdfSigningError(ValueError):
@@ -115,3 +127,105 @@ def sign_pdf(
     output = signers.sign_pdf(writer, metadata, signer=_signer(private_key, certificate))
     sign_ms = (time.perf_counter() - started) * 1000
     return output.getvalue(), round(sign_ms, 3)
+
+
+# ------------------------------------------------------------ verification
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    """What checking a PDF's Cipher Safe signature found.
+
+    ``status`` sums it up: ``valid``, ``modified`` (content changed or added
+    after signing), ``unknown_signer`` (intact, but not the owner's
+    certificate), ``invalid`` (unreadable or bad signature) or ``unsigned``.
+    """
+
+    status: str
+    signed: bool
+    intact: bool = False
+    valid: bool = False
+    signer_common_name: str | None = None
+    signer_fingerprint: str | None = None
+    signer_matches_owner: bool = False
+    coverage: str | None = None
+    modified_after_signing: bool = False
+    verify_ms: float = 0.0
+
+    def as_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "signed": self.signed,
+            "intact": self.intact,
+            "valid": self.valid,
+            "signer": (
+                {"common_name": self.signer_common_name, "fingerprint": self.signer_fingerprint}
+                if self.signed
+                else None
+            ),
+            "signer_matches_owner": self.signer_matches_owner,
+            "coverage": self.coverage,
+            "modified_after_signing": self.modified_after_signing,
+            "verify_ms": self.verify_ms,
+        }
+
+
+def _fingerprint(der: bytes) -> str:
+    """SHA-256 of a DER certificate as ``AB:CD:...`` (same as ``certificate_fingerprint``)."""
+
+    return ":".join(f"{byte:02X}" for byte in hashlib.sha256(der).digest())
+
+
+def verify_pdf(data: bytes, owner_certificates: list[x509.Certificate]) -> VerificationResult:
+    """Check the Cipher Safe signature in ``data``.
+
+    The only trusted certificates are the owner's own (self-signed, so no
+    public CA is involved): a valid signature by anyone else is reported as
+    ``unknown_signer``. Raises :class:`NotAPdf` for bytes that aren't a PDF.
+    """
+
+    if not is_pdf(data):
+        raise NotAPdf("This file is not a PDF.")
+    started = time.perf_counter()
+    try:
+        reader = PdfFileReader(BytesIO(data))
+        signature = next((s for s in reader.embedded_signatures if s.field_name == SIGNATURE_FIELD), None)
+    except (PdfReadError, ValueError, KeyError) as exc:
+        raise NotAPdf("This PDF could not be read.") from exc
+    if signature is None:
+        return VerificationResult(status="unsigned", signed=False)
+
+    der_certificates = [c.public_bytes(serialization.Encoding.DER) for c in owner_certificates]
+    trusted = [asn1_x509.Certificate.load(der) for der in der_certificates]
+    owner_fingerprints = {_fingerprint(cert.dump()) for cert in trusted}
+    try:
+        status = validate_pdf_signature(signature, ValidationContext(trust_roots=trusted, allow_fetching=False))
+    except (SignatureValidationError, ValueError, KeyError):
+        verify_ms = round((time.perf_counter() - started) * 1000, 3)
+        return VerificationResult(status="invalid", signed=True, verify_ms=verify_ms)
+
+    signer_cert = status.signing_cert
+    signer_fingerprint = _fingerprint(signer_cert.dump())
+    coverage = status.coverage.name if status.coverage is not None else None
+    modified_after = coverage != "ENTIRE_FILE"
+    matches_owner = signer_fingerprint in owner_fingerprints
+    if not status.intact or (status.valid and modified_after):
+        summary = "modified"
+    elif not status.valid:
+        summary = "invalid"
+    elif not matches_owner:
+        summary = "unknown_signer"
+    else:
+        summary = "valid"
+    return VerificationResult(
+        status=summary,
+        signed=True,
+        intact=status.intact,
+        valid=status.valid,
+        signer_common_name=signer_cert.subject.native.get("common_name"),
+        signer_fingerprint=signer_fingerprint,
+        signer_matches_owner=matches_owner,
+        coverage=coverage,
+        modified_after_signing=modified_after,
+        verify_ms=round((time.perf_counter() - started) * 1000, 3),
+    )
