@@ -11,6 +11,11 @@ AES-GCM with raw random keys in :mod:`core.crypto.symmetric`.
 
 from .algorithms import GCM_TAG_SIZE, TAG_SIZE, DecryptionResult, EncryptionResult, IntegrityError, decrypt, encrypt
 from .asymmetric import (
+    build_signing_certificate,
+    certificate_der,
+    certificate_fingerprint,
+    certificate_pem,
+    load_certificate,
     ENVELOPE_PREFIX,
     Envelope,
     envelope_digest,
@@ -39,6 +44,11 @@ from .symmetric import (
 from .keys import PBKDF2_ROUNDS, SALT_SIZE, derive_key, derive_keys, new_salt
 
 __all__ = [
+    "build_signing_certificate",
+    "certificate_der",
+    "certificate_fingerprint",
+    "certificate_pem",
+    "load_certificate",
     "ENVELOPE_PREFIX",
     "Envelope",
     "envelope_digest",

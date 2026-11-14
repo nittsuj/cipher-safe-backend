@@ -23,14 +23,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import datetime
 import hashlib
 import secrets
 from typing import NamedTuple
 
+from cryptography import x509
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.x509.oid import NameOID, ObjectIdentifier
 
 from .algorithms import IntegrityError
 from .keys import SALT_SIZE, derive_key, new_salt
@@ -199,3 +202,82 @@ def envelope_digest(wrapped_key: bytes) -> str:
     pasted envelope can be checked before any RSA work."""
 
     return hashlib.sha256(wrapped_key).hexdigest()
+
+
+# ------------------------------------------------ signing certificates (X.509)
+
+#: Organisation named in every certificate Cipher Safe issues.
+CERTIFICATE_ORGANISATION = "Cipher Safe"
+
+#: How long a signing certificate is valid.
+CERTIFICATE_VALIDITY = datetime.timedelta(days=3 * 365)
+
+#: ``id-kp-documentSigning`` (RFC 9336): the certificate is meant for signing
+#: documents. ``cryptography`` has no named constant for it.
+DOCUMENT_SIGNING_OID = ObjectIdentifier("1.3.6.1.5.5.7.3.36")
+
+
+def build_signing_certificate(private_key: rsa.RSAPrivateKey, common_name: str) -> x509.Certificate:
+    """A self-signed X.509 v3 certificate for signing PDFs with ``private_key``.
+
+    PDF signatures carry the signer's certificate; readers such as Adobe
+    Acrobat show the subject and check the signature against the public key
+    in it. Self-signed means readers report "identity unknown" until the user
+    trusts the certificate.
+    """
+
+    name = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, CERTIFICATE_ORGANISATION),
+        ]
+    )
+    public_key = private_key.public_key()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=5))  # tolerate clock skew
+        .not_valid_after(now + CERTIFICATE_VALIDITY)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=True,  # non-repudiation
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage([DOCUMENT_SIGNING_OID]), critical=False)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+        .sign(private_key, hashes.SHA256())
+    )
+
+
+def certificate_pem(certificate: x509.Certificate) -> str:
+    return certificate.public_bytes(serialization.Encoding.PEM).decode("ascii")
+
+
+def load_certificate(pem: str) -> x509.Certificate:
+    return x509.load_pem_x509_certificate(pem.encode("ascii"))
+
+
+def certificate_der(certificate: x509.Certificate) -> bytes:
+    """The certificate as DER, the format of a ``.cer`` file readers import."""
+
+    return certificate.public_bytes(serialization.Encoding.DER)
+
+
+def certificate_fingerprint(certificate: x509.Certificate) -> str:
+    """SHA-256 of the DER certificate as ``AB:CD:...``: the value PDF readers show."""
+
+    return ":".join(f"{byte:02X}" for byte in certificate.fingerprint(hashes.SHA256()))

@@ -8,9 +8,12 @@ from django.test import TestCase
 from ..constants import KEY_PURPOSE_ENCRYPTION, KEY_PURPOSE_SIGNING
 from ..crypto import (
     IntegrityError,
+    certificate_fingerprint,
     fingerprint,
     generate_rsa_key_pair,
     key_pair_aad,
+    load_certificate,
+    load_public_key,
     public_key_pem,
     unwrap_private_key,
     wrap_private_key,
@@ -116,3 +119,38 @@ class KeyPairServiceTests(TestCase):
             raw = bytes(value) if isinstance(value, (bytes, memoryview)) else str(value).encode()
             self.assertNotIn(pkcs8, raw)
             self.assertNotIn(b"PRIVATE KEY", raw)
+
+
+class SigningKeyPairTests(TestCase):
+    """A signing pair comes with a self-signed certificate."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user("alice", password=PASSWORD)
+
+    def test_signing_pair_gets_a_certificate_for_its_key(self):
+        pair, _ = ensure_key_pair(self.user, KEY_PURPOSE_SIGNING, PASSWORD)
+        certificate = load_certificate(pair.certificate_pem)
+        self.assertEqual(certificate.subject.rfc4514_string(), "O=Cipher Safe,CN=alice")
+        self.assertEqual(fingerprint(certificate.public_key()), fingerprint(load_public_key(pair.public_key_pem)))
+        # The certificate belongs to the stored private key.
+        private_key = load_private_key(pair, PASSWORD)
+        self.assertEqual(fingerprint(private_key.public_key()), fingerprint(certificate.public_key()))
+
+    def test_signing_fingerprint_is_certificate_sha256(self):
+        pair, _ = ensure_key_pair(self.user, KEY_PURPOSE_SIGNING, PASSWORD)
+        self.assertEqual(pair.fingerprint, certificate_fingerprint(load_certificate(pair.certificate_pem)))
+
+    def test_encryption_pair_has_no_certificate(self):
+        pair, _ = ensure_key_pair(self.user, KEY_PURPOSE_ENCRYPTION, PASSWORD)
+        self.assertEqual(pair.certificate_pem, "")
+        self.assertEqual(pair.fingerprint, fingerprint(load_public_key(pair.public_key_pem)))
+
+    def test_rotation_issues_new_certificate_and_keeps_old(self):
+        old, _ = ensure_key_pair(self.user, KEY_PURPOSE_SIGNING, PASSWORD)
+        new = rotate_key_pair(self.user, KEY_PURPOSE_SIGNING, PASSWORD)
+        old.refresh_from_db()
+        self.assertFalse(old.active)
+        self.assertTrue(old.certificate_pem)  # old signatures can still be traced to it
+        self.assertNotEqual(load_certificate(old.certificate_pem), load_certificate(new.certificate_pem))
+        self.assertNotEqual(old.fingerprint, new.fingerprint)

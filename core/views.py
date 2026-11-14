@@ -22,6 +22,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .constants import (
     KEY_PURPOSE_CHOICES,
     KEY_PURPOSE_ENCRYPTION,
+    KEY_PURPOSE_SIGNING,
     GRANT_KIND_PROFILE,
     PREVIEWABLE_TYPES,
     REQUEST_APPROVED,
@@ -29,7 +30,7 @@ from .constants import (
     ROLE_PATIENT,
     SUPPORTED_ALGORITHMS,
 )
-from .crypto import IntegrityError
+from .crypto import IntegrityError, certificate_der, load_certificate
 from .models import (
     AccessRequest,
     GrantedItem,
@@ -710,3 +711,36 @@ class GrantedItemOpenView(APIView):
         response = file_response(data, content_type, filename, inline=_wants_inline(request))
         response["X-Content-Type"] = content_type
         return response
+
+
+def certificate_response(pair: UserKeyPair | None, username: str) -> HttpResponse:
+    """A user's signing certificate as a ``.cer`` (DER) download, to import into
+    a PDF reader's trusted certificates. 404 without a signing key."""
+
+    if pair is None or not pair.certificate_pem:
+        raise NotFound("No signing certificate yet.")
+    der = certificate_der(load_certificate(pair.certificate_pem))
+    response = HttpResponse(der, content_type="application/pkix-cert")
+    response["Content-Disposition"] = content_disposition_header(True, f"cipher-safe-{username}.cer")
+    return response
+
+
+class MyCertificateView(APIView):
+    """Download my signing certificate."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        pair = UserKeyPair.objects.filter(user=request.user, purpose=KEY_PURPOSE_SIGNING, active=True).first()
+        return certificate_response(pair, request.user.username)
+
+
+class UserCertificateView(APIView):
+    """Anyone's signing certificate, so someone who received their PDF can trust it."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username: str):
+        owner = get_object_or_404(User, username=username)
+        pair = UserKeyPair.objects.filter(user=owner, purpose=KEY_PURPOSE_SIGNING, active=True).first()
+        return certificate_response(pair, owner.username)

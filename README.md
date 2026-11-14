@@ -183,6 +183,7 @@ generated on first use and can be rotated; the old pair stays, inactive.
 | Key-encryption key | PBKDF2-HMAC-SHA256 of the user's password, 600,000 rounds, random 16-byte salt per pair |
 | Associated data | `cipher-safe/keypair:<user id>:<purpose>`, so a stored key can't be moved to another user or purpose |
 | In use | Decrypted in memory, for one request, with the password the client sends |
+| Signing certificate | Self-signed X.509 v3, `CN=<username>, O=Cipher Safe`, valid 3 years, `CA:FALSE`, key usage digital signature + non-repudiation, extended key usage document signing; for signing pairs the fingerprint is the certificate's SHA-256 |
 
 Changing the password would need every private key re-wrapped; there is no
 password change, so this is a known limitation.
@@ -313,6 +314,8 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/me/keys/` | My active key pairs: purpose, algorithm, fingerprint, public key (never the private key) |
 | POST | `/api/me/keys/` | Generate a pair (`purpose`: `ENCRYPTION` or `SIGNING`; `rotate`: replace the active one); needs the password; 201 new, 200 existing |
 | GET | `/api/users/{username}/public-key/?purpose=ENCRYPTION` | Another user's active public key and fingerprint; 404 if they have none |
+| GET | `/api/me/keys/certificate/` | Download my signing certificate (`cipher-safe-<username>.cer`, DER); 404 without a signing key |
+| GET | `/api/users/{username}/certificate/` | Anyone's signing certificate, to trust it in a PDF reader; 404 if they have none |
 | GET | `/api/me/personal-data/?algorithm=AES` | Decrypt the patient profile |
 | PUT | `/api/me/personal-data/` | Replace the patient profile (encrypted with AES/DES/RC4) |
 | GET | `/api/files/?category=VIDEO` | List files (metadata only) |

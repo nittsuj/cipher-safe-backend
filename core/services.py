@@ -29,6 +29,7 @@ from .constants import (
     GRANT_KIND_FILE,
     GRANT_KIND_PROFILE,
     KEY_PURPOSE_ENCRYPTION,
+    KEY_PURPOSE_SIGNING,
     MODE_FOR,
     REQUEST_APPROVED,
     REQUEST_CANCELLED,
@@ -41,6 +42,9 @@ from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, Reques
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
     SealedData,
+    build_signing_certificate,
+    certificate_fingerprint,
+    certificate_pem,
     decrypt_with_key,
     derive_key,
     encrypt,
@@ -300,7 +304,9 @@ def active_key_pair(user, purpose: str) -> UserKeyPair | None:
 def _create_key_pair(user, purpose: str, password: str) -> UserKeyPair:
     """Generate a pair and store it with the private key wrapped by ``password``.
 
-    The private key exists unencrypted only inside this call.
+    A signing pair also gets a self-signed X.509 certificate (PDF signatures
+    carry it), and its fingerprint is the certificate's, the value PDF readers
+    show. The private key exists unencrypted only inside this call.
     """
 
     started = time.perf_counter()
@@ -308,14 +314,19 @@ def _create_key_pair(user, purpose: str, password: str) -> UserKeyPair:
     generation_ms = (time.perf_counter() - started) * 1000
     public_key = private_key.public_key()
     wrapped = wrap_private_key(private_key, password, key_pair_aad(user.pk, purpose))
+    certificate_text, shown_fingerprint = "", fingerprint(public_key)
+    if purpose == KEY_PURPOSE_SIGNING:
+        certificate = build_signing_certificate(private_key, user.username)
+        certificate_text, shown_fingerprint = certificate_pem(certificate), certificate_fingerprint(certificate)
     return UserKeyPair.objects.create(
         user=user,
         purpose=purpose,
         public_key_pem=public_key_pem(public_key),
+        certificate_pem=certificate_text,
         encrypted_private_key=wrapped.ciphertext,
         kek_salt=wrapped.salt,
         nonce=wrapped.nonce,
-        fingerprint=fingerprint(public_key),
+        fingerprint=shown_fingerprint,
         generation_ms=round(generation_ms, 3),
     )
 

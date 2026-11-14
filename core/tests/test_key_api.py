@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from cryptography import x509
 from rest_framework import status
 
+from ..crypto import certificate_fingerprint
 from ..models import User, UserKeyPair
 
 from .base import PASSWORD, AuthenticatedApiTestCase
 
 KEYS_URL = "/api/me/keys/"
-PUBLIC_FIELDS = {"purpose", "algorithm", "fingerprint", "public_key_pem", "has_certificate", "created_at"}
+PUBLIC_FIELDS = {
+    "purpose",
+    "algorithm",
+    "fingerprint",
+    "public_key_pem",
+    "has_certificate",
+    "certificate",
+    "created_at",
+}
 
 
 class KeyPairApiTests(AuthenticatedApiTestCase):
@@ -89,3 +99,52 @@ class KeyPairApiTests(AuthenticatedApiTestCase):
     def test_public_key_lookup_rejects_unknown_purpose(self):
         response = self.client.get("/api/users/alice/public-key/?purpose=BOGUS")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class CertificateApiTests(AuthenticatedApiTestCase):
+    """Certificate details in /api/me/keys/ and the .cer downloads."""
+
+    def _make_signing_key(self):
+        response = self.client.post(KEYS_URL, {"purpose": "SIGNING"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        return response.json()
+
+    def test_signing_key_lists_its_certificate(self):
+        created = self._make_signing_key()
+        self.assertTrue(created["has_certificate"])
+        certificate = created["certificate"]
+        self.assertEqual(certificate["subject"], "O=Cipher Safe,CN=alice")
+        self.assertEqual(certificate["fingerprint"], created["fingerprint"])
+        self.assertLess(certificate["not_before"], certificate["not_after"])
+
+    def test_encryption_key_has_no_certificate(self):
+        created = self.client.post(KEYS_URL, {"purpose": "ENCRYPTION"}, format="json").json()
+        self.assertEqual((created["has_certificate"], created["certificate"]), (False, None))
+
+    def test_certificate_download_der(self):
+        created = self._make_signing_key()
+        response = self.client.get("/api/me/keys/certificate/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "application/pkix-cert")
+        self.assertIn("cipher-safe-alice.cer", response["Content-Disposition"])
+        certificate = x509.load_der_x509_certificate(response.content)
+        self.assertEqual(certificate_fingerprint(certificate), created["fingerprint"])
+
+    def test_anyone_can_download_someones_certificate(self):
+        self._make_signing_key()
+        User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        login = self.client.post("/api/auth/login/", {"username": "budi", "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+        response = self.client.get("/api/users/alice/certificate/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        x509.load_der_x509_certificate(response.content)
+
+    def test_no_signing_key_is_404(self):
+        self.client.post(KEYS_URL, {"purpose": "ENCRYPTION"}, format="json")
+        self.assertEqual(self.client.get("/api/me/keys/certificate/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get("/api/users/alice/certificate/").status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get("/api/users/nobody/certificate/").status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_certificate_needs_authentication(self):
+        self.client.credentials()
+        self.assertEqual(self.client.get("/api/me/keys/certificate/").status_code, status.HTTP_401_UNAUTHORIZED)
