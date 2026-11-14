@@ -3,7 +3,8 @@ from __future__ import annotations
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
-from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES, ROLE_CHOICES, ROLE_PATIENT
+from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES, KEY_PURPOSE_CHOICES, ROLE_CHOICES, ROLE_PATIENT
+from .crypto import RSA_ALGORITHM, WrappedKey
 from .crypto import decrypt as decrypt_payload
 
 
@@ -254,3 +255,49 @@ class FileShare(EncryptionEnvelope):
 
     def __str__(self) -> str:
         return f"Record {self.file_id} -> {self.doctor.username}"
+
+
+class UserKeyPair(models.Model):
+    """An RSA key pair belonging to one user, for one purpose.
+
+    The public key is public. The private key is stored only encrypted
+    (AES-256-GCM under a key derived from the user's password, see
+    :mod:`core.crypto.asymmetric`), and is decrypted in memory for one request
+    at a time. Rotating a key keeps the old pair as inactive, so data already
+    encrypted for it can still be opened.
+    """
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="key_pairs")
+    purpose = models.CharField(max_length=10, choices=KEY_PURPOSE_CHOICES)
+    algorithm = models.CharField(max_length=16, default=RSA_ALGORITHM)
+    public_key_pem = models.TextField()
+    #: Self-signed X.509 certificate, only for signing keys.
+    certificate_pem = models.TextField(blank=True)
+    #: PKCS#8 private key encrypted with AES-256-GCM, tag appended.
+    encrypted_private_key = models.BinaryField()
+    kek_salt = models.BinaryField()
+    nonce = models.BinaryField()
+    fingerprint = models.CharField(max_length=95, db_index=True)
+    active = models.BooleanField(default=True)
+    generation_ms = models.FloatField(default=0.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "purpose"],
+                condition=models.Q(active=True),
+                name="uniq_active_key_pair",
+            )
+        ]
+
+    @property
+    def wrapped(self) -> WrappedKey:
+        """The encrypted private key in the form :func:`unwrap_private_key` takes."""
+
+        return WrappedKey(bytes(self.encrypted_private_key), bytes(self.kek_salt), bytes(self.nonce))
+
+    def __str__(self) -> str:
+        state = "active" if self.active else "inactive"
+        return f"{self.user} {self.purpose} {self.algorithm} ({state})"

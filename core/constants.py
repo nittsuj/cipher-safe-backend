@@ -25,6 +25,12 @@ ROLE_PATIENT = "PATIENT"
 ROLE_DOCTOR = "DOCTOR"
 ROLE_CHOICES = [(ROLE_PATIENT, "Patient"), (ROLE_DOCTOR, "Doctor")]
 
+#: What a user key pair is for. Separate pairs keep the key that decrypts
+#: shared-record keys apart from the key that signs PDFs.
+KEY_PURPOSE_ENCRYPTION = "ENCRYPTION"
+KEY_PURPOSE_SIGNING = "SIGNING"
+KEY_PURPOSE_CHOICES = [(KEY_PURPOSE_ENCRYPTION, "Encryption"), (KEY_PURPOSE_SIGNING, "Signing")]
+
 #: Content types the browser may render inline in a preview. Anything else
 #: (HTML, SVG, ...) could run script, so it is only offered as a download.
 PREVIEWABLE_TYPES = (
@@ -40,6 +46,9 @@ PREVIEWABLE_TYPES = (
 )
 
 __all__ = [
+    "KEY_PURPOSE_CHOICES",
+    "KEY_PURPOSE_ENCRYPTION",
+    "KEY_PURPOSE_SIGNING",
     "PREVIEWABLE_TYPES",
     "ROLE_CHOICES",
     "ROLE_DOCTOR",
