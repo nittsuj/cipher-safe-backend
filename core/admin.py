@@ -3,7 +3,6 @@ from django.contrib.auth.admin import UserAdmin
 
 from .models import (
     AccessRequest,
-    FileShare,
     GrantedItem,
     DownloadEvent,
     EncryptedValue,
@@ -38,11 +37,6 @@ class EncryptedValueAdmin(admin.ModelAdmin):
 class DownloadEventAdmin(admin.ModelAdmin):
     list_display = ("id", "file", "algorithm", "success", "key_derivation_ms", "cipher_ms", "created_at")
     list_filter = ("algorithm", "success")
-
-
-@admin.register(FileShare)
-class FileShareAdmin(admin.ModelAdmin):
-    list_display = ("id", "file", "doctor", "expires_at", "access_count")
 
 
 @admin.register(UserKeyPair)

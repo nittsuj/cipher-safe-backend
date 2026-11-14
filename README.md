@@ -168,17 +168,6 @@ For a full implementation walkthrough with code, see
 > credential submission. The query string is deliberately not accepted, since
 > URLs are recorded in access logs, browser history and `Referer` headers.
 
-## Sharing with a doctor
-
-Accounts are either **patients** (own a vault) or **doctors** (only receive
-shares). To share, the patient's record is decrypted with their password and
-re-encrypted with **AES-256-GCM** under a fresh random **share key** (100 bits,
-shown as `XXXX-XXXX-XXXX-XXXX-XXXX`). The key is returned once and never
-stored; the patient sends it to the doctor themselves. The share copy holds the
-file name and bytes together, so the doctor sees only who shared what kind of
-record until they enter the key. Shares expire (1 hour to 1 week), can be
-revoked, count how often they were opened, and the open endpoint is throttled.
-
 ## User key pairs
 
 Every account (patient or doctor) can have **RSA key pairs**, one active pair
@@ -195,12 +184,39 @@ generated on first use and can be rotated; the old pair stays, inactive.
 | Associated data | `cipher-safe/keypair:<user id>:<purpose>`, so a stored key can't be moved to another user or purpose |
 | In use | Decrypted in memory, for one request, with the password the client sends |
 
-Granted access ends after the chosen period (1 hour to 1 week): every item
-endpoint then returns 404. `python manage.py purge_expired_grants` deletes the
-expired copies and keys; run it regularly (e.g. from cron).
-
 Changing the password would need every private key re-wrapped; there is no
 password change, so this is a known limitation.
+
+## Sharing through access requests
+
+Any user can ask any other user for their data; the owner decides what to
+share and for how long. Accounts are still labelled **patient** (owns a vault)
+or **doctor**, but both can ask and be asked.
+
+1. **Request:** the requester names the owner, with an optional message and a
+   hint (a record category or the profile). File names stay encrypted, so the
+   requester can't pick a file.
+2. **Approve:** the owner picks records and/or a snapshot of their profile and
+   a period (1 hour to 1 week). For each item the server makes a random
+   **AES-256 key**, stores a separate copy encrypted with **AES-256-GCM** under
+   it, and encrypts the key with the requester's public key (**RSA-OAEP**,
+   SHA-256). The result is an *envelope*, `CSK1.<request>.<item>.<base64url>`.
+3. **Send:** the owner sends each envelope outside the app (WhatsApp, email).
+   Only the requester's private key opens it, so the channel doesn't need to be
+   secret.
+4. **Redeem:** the requester pastes the envelope; the server checks its hash,
+   opens it with their private key (unlocked with their password) and keeps the
+   item key encrypted for them.
+5. **End:** the owner can stop access at any time (copies and keys deleted).
+   After the period every item endpoint returns 404, and
+   `python manage.py purge_expired_grants` deletes the expired copies and keys;
+   run it regularly (e.g. from cron).
+
+What is stored, per item: the encrypted copy; the item key encrypted for the
+owner (and, after redeeming, for the requester) with a key derived from that
+user's password; the envelope encrypted for the owner, so the same one can be
+shown again; and the envelope's SHA-256. The item key and the envelope are
+never stored in the clear.
 
 ## Setup
 
@@ -306,11 +322,6 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/files/{id}/download/?algorithm=DES&inline=1` | Decrypt and download; `inline=1` serves safe types (PDF, images, video, text) for in-browser preview |
 | GET | `/api/files/{id}/ciphertext/?algorithm=DES` | Download the stored copy as-is (ciphertext), keeping the original extension (`lab.DES-encrypted.pdf`); needs the password |
 | GET | `/api/files/{id}/benchmark/?algorithm=AES&runs=10` | N timed decryptions (total and cipher-only samples) |
-| GET | `/api/files/{id}/shares/` | Patient: list shares of a record |
-| POST | `/api/files/{id}/shares/` | Patient: share with a doctor (`doctor`, `expires_hours` 1-168); returns the one-time `share_key` |
-| DELETE | `/api/shares/{id}/` | Patient: stop sharing |
-| GET | `/api/shares/received/` | Doctor: unexpired records shared with me (name stays encrypted) |
-| GET | `/api/shares/received/{id}/open/?inline=1` | Doctor: decrypt with the `X-Share-Key` header |
 | POST | `/api/access-requests/` | Ask a user for their data (`owner`, optional `message`, `category`: a record category or `PROFILE`); any role to any role; one pending request per pair |
 | GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first; approved ones list their `items` (id, kind, category, redeemed, access count; never names or content) |
 | POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |

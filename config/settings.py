@@ -135,7 +135,6 @@ REST_FRAMEWORK = {
         'user': env('THROTTLE_USER', default='240/min'),
         'auth': env('THROTTLE_AUTH', default='10/min'),
         'benchmark': env('THROTTLE_BENCHMARK', default='10/min'),
-        'share': env('THROTTLE_SHARE', default='20/min'),
         'keygen': env('THROTTLE_KEYGEN', default='10/min'),
         'request': env('THROTTLE_REQUEST', default='10/min'),
         'redeem': env('THROTTLE_REDEEM', default='10/min'),
@@ -163,7 +162,7 @@ CORS_ALLOWED_ORIGINS = env.list(
 )
 CORS_ALLOW_CREDENTIALS = True
 # Custom header carrying the cipher password on crypto endpoints.
-CORS_ALLOW_HEADERS = (*default_headers, 'x-cipher-password', 'x-share-key')
+CORS_ALLOW_HEADERS = (*default_headers, 'x-cipher-password')
 # Let the SPA read the decrypt timing and the real type of a previewed or shared file.
 CORS_EXPOSE_HEADERS = ('content-disposition', 'x-cipher-algorithm', 'x-cipher-decrypt-ms', 'x-content-type')
 
