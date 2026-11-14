@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import secrets
 import struct
 import time
@@ -24,10 +25,31 @@ from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
 from django.utils import timezone
 
-from .constants import MODE_FOR, REQUEST_CANCELLED, REQUEST_DENIED, REQUEST_PENDING, SUPPORTED_ALGORITHMS
-from .exceptions import InvalidTransition
+from .constants import (
+    GRANT_KIND_FILE,
+    GRANT_KIND_PROFILE,
+    KEY_PURPOSE_ENCRYPTION,
+    MODE_FOR,
+    REQUEST_APPROVED,
+    REQUEST_CANCELLED,
+    REQUEST_DENIED,
+    REQUEST_PENDING,
+    SUPPORTED_ALGORITHMS,
+)
+from .exceptions import InvalidTransition, RequesterHasNoKey
 from .crypto import (
+    SYMMETRIC_KEY_SIZE,
+    SealedData,
+    decrypt_with_key,
+    derive_key,
     encrypt,
+    encrypt_with_key,
+    envelope_digest,
+    format_envelope,
+    load_public_key,
+    new_salt,
+    new_symmetric_key,
+    wrap_key,
     fingerprint,
     generate_rsa_key_pair,
     key_pair_aad,
@@ -42,13 +64,18 @@ from .models import (
     FileCiphertext,
     FileLabel,
     FileShare,
+    GrantedItem,
     PersonalData,
+    SharedKey,
     StoredFile,
     UserKeyPair,
 )
 
 #: ``EncryptedValue.field_name`` of the single encrypted patient-profile record.
 PROFILE_RECORD = "profile"
+
+#: Timings of key generation, wrapping and unwrapping go here (for the report).
+key_log = logging.getLogger("core.keys")
 
 
 def encrypt_with_all_algorithms(data: bytes, password: str):
@@ -418,3 +445,115 @@ def cancel_request(access_request: AccessRequest) -> AccessRequest:
     """Requester withdraws a pending request."""
 
     return _decide(access_request, REQUEST_PENDING, REQUEST_CANCELLED)
+
+
+
+# ------------------------------------------------- approving with item keys
+
+
+def seal_key_for_user(key: bytes, password: str, aad: bytes) -> tuple[SealedData, bytes]:
+    """Encrypt an item key with a key derived from a user's password.
+
+    Returns ``(sealed, salt)``. Same protection as the user's own data:
+    PBKDF2 (fresh salt) then AES-256-GCM.
+    """
+
+    salt = new_salt()
+    return encrypt_with_key(key, derive_key(password, salt, SYMMETRIC_KEY_SIZE), aad), salt
+
+
+def open_key_for_user(sealed: SealedData, salt: bytes, password: str, aad: bytes) -> bytes:
+    """Reverse of :func:`seal_key_for_user`; ``IntegrityError`` on a wrong password."""
+
+    return decrypt_with_key(sealed, derive_key(password, salt, SYMMETRIC_KEY_SIZE), aad)
+
+
+def _item_payload(owner, password: str, stored_file: StoredFile | None) -> bytes:
+    """Decrypt what is being granted: a record (name, type and bytes together)
+    or a snapshot of the profile as JSON."""
+
+    if stored_file is None:
+        personal_data = PersonalData.objects.filter(owner=owner).first()
+        fields = decrypt_personal_data(personal_data, password, "AES") if personal_data else {}
+        return json.dumps(fields, ensure_ascii=False).encode("utf-8")
+    label = decrypt_file_label(stored_file, password)
+    data = decrypt_file(stored_file.ciphertexts.get(algorithm="AES"), password).plaintext
+    return pack_share_payload(label, data)
+
+
+def _grant_item(access_request, owner_password, stored_file, requester_pair, requester_public_key):
+    """Create one granted item: its own random key K, an AES-GCM copy under K,
+    K sealed for the owner, and the envelope (K under the requester's RSA key).
+
+    Returns ``(item, envelope_text)``. The envelope is not stored, only its hash.
+    """
+
+    payload = _item_payload(access_request.owner, owner_password, stored_file)
+    kind = GRANT_KIND_PROFILE if stored_file is None else GRANT_KIND_FILE
+    item = GrantedItem.objects.create(
+        request=access_request, kind=kind, file=stored_file, nonce=b"", plaintext_size=len(payload)
+    )
+
+    key = new_symmetric_key()
+    sealed_item = encrypt_with_key(payload, key, item.aad)
+    item.nonce = sealed_item.nonce
+    item.blob.save(f"{access_request.pk}-{item.pk}-{secrets.token_hex(4)}.bin", ContentFile(sealed_item.ciphertext))
+
+    started = time.perf_counter()
+    wrapped = wrap_key(requester_public_key, key)
+    wrap_ms = (time.perf_counter() - started) * 1000
+
+    shared_key = SharedKey(item=item, envelope_sha256=envelope_digest(wrapped), requester_key=requester_pair)
+    sealed_for_owner, owner_salt = seal_key_for_user(key, owner_password, shared_key.aad("owner"))
+    shared_key.key_for_owner = sealed_for_owner.ciphertext
+    shared_key.owner_nonce = sealed_for_owner.nonce
+    shared_key.owner_salt = owner_salt
+    shared_key.save()
+
+    key_log.info("wrap item=%s rsa_oaep_ms=%.3f", item.pk, wrap_ms)
+    return item, format_envelope(access_request.pk, item.pk, wrapped)
+
+
+def approve_request(
+    access_request: AccessRequest,
+    owner_password: str,
+    files: list[StoredFile],
+    include_profile: bool,
+    expires_hours: int,
+) -> tuple[AccessRequest, UserKeyPair, list[tuple[GrantedItem, str]]]:
+    """Grant a pending request: one granted item, with its own key, per record
+    (and optionally the profile).
+
+    Returns the updated request, the requester's key pair (its fingerprint is
+    shown to the owner) and ``(item, envelope)`` pairs. The envelopes are what
+    the owner sends to the requester out of band; the server keeps only their
+    hashes. ``files`` must already be checked to belong to the owner.
+    """
+
+    if not files and not include_profile:
+        raise ValueError("Grant at least one item.")
+    if any(stored_file.owner_id != access_request.owner_id for stored_file in files):
+        raise ValueError("Only the owner's own records can be granted.")
+
+    requester_pair = active_key_pair(access_request.requester, KEY_PURPOSE_ENCRYPTION)
+    if requester_pair is None:
+        raise RequesterHasNoKey(
+            f"{access_request.requester.username} has no encryption key yet. Ask them to open Cipher Safe once."
+        )
+    requester_public_key = load_public_key(requester_pair.public_key_pem)
+
+    with transaction.atomic():
+        locked = AccessRequest.objects.select_for_update().get(pk=access_request.pk)
+        if locked.status != REQUEST_PENDING:
+            raise InvalidTransition(f"This request is already {locked.status.lower()}.")
+        targets: list[StoredFile | None] = list(files) + ([None] if include_profile else [])
+        grants = [
+            _grant_item(locked, owner_password, stored_file, requester_pair, requester_public_key)
+            for stored_file in targets
+        ]
+        now = timezone.now()
+        locked.status = REQUEST_APPROVED
+        locked.decided_at = now
+        locked.expires_at = now + timedelta(hours=expires_hours)
+        locked.save(update_fields=["status", "decided_at", "expires_at"])
+    return locked, requester_pair, grants

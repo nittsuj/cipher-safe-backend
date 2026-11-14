@@ -39,6 +39,15 @@ class InvalidTransition(APIException):
     default_code = "invalid_transition"
 
 
+class RequesterHasNoKey(APIException):
+    """The requester has no encryption key pair yet, so nothing can be
+    encrypted for them. The server can't make one without their password."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "The requester has no encryption key yet. Ask them to open Cipher Safe once."
+    default_code = "requester_has_no_key"
+
+
 def exception_handler(exc, context):
     """DRF's handler, plus :class:`IntegrityError` -> HTTP 409."""
 
