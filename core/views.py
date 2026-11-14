@@ -26,6 +26,7 @@ from .constants import (
     GRANT_KIND_PROFILE,
     PREVIEWABLE_TYPES,
     REQUEST_APPROVED,
+    REQUEST_PENDING,
     ROLE_DOCTOR,
     ROLE_PATIENT,
     SUPPORTED_ALGORITHMS,
@@ -659,10 +660,10 @@ class AccessRequestDetailView(APIView):
         access_request = _request_for(request.user, pk)
         if access_request.requester_id == request.user.pk:
             cancel_request(access_request)
-        elif access_request.status == REQUEST_APPROVED:
-            revoke_request(access_request)
-        else:
+        elif access_request.status == REQUEST_PENDING:
             raise PermissionDenied("Only the requester can cancel a request; deny it instead.")
+        else:
+            revoke_request(access_request)  # 409 unless it is approved
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
