@@ -14,13 +14,11 @@ from .constants import (
     KEY_PURPOSE_CHOICES,
     REQUEST_CATEGORY_CHOICES,
     REQUEST_PENDING,
-    ROLE_DOCTOR,
 )
 from .models import (
     AccessRequest,
     DownloadEvent,
     FileCiphertext,
-    FileShare,
     GrantedItem,
     StoredFile,
     UserKeyPair,
@@ -200,48 +198,6 @@ class DownloadEventSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class ShareCreateSerializer(serializers.Serializer):
-    doctor = serializers.CharField(help_text="Username of the doctor to share with.")
-    expires_hours = serializers.IntegerField(min_value=1, max_value=168, default=24)
-
-    def validate_doctor(self, value):
-        doctor = User.objects.filter(username=value, role=ROLE_DOCTOR).first()
-        if doctor is None:
-            raise serializers.ValidationError("No doctor account with that username.")
-        return doctor
-
-
-class FileShareSerializer(serializers.ModelSerializer):
-    """A share as the patient sees it."""
-
-    doctor = serializers.CharField(source="doctor.username", read_only=True)
-    active = serializers.SerializerMethodField()
-
-    def get_active(self, obj) -> bool:
-        from django.utils import timezone
-
-        return obj.expires_at > timezone.now()
-
-    class Meta:
-        model = FileShare
-        fields = ["id", "file", "doctor", "created_at", "expires_at", "active", "access_count", "last_accessed_at"]
-        read_only_fields = fields
-
-
-class ReceivedShareSerializer(serializers.ModelSerializer):
-    """A share as the doctor sees it before entering the key: who shared what
-    kind of record. The name and content stay encrypted."""
-
-    patient = serializers.CharField(source="file.owner.username", read_only=True)
-    category = serializers.CharField(source="file.category", read_only=True)
-    plaintext_size = serializers.IntegerField(source="file.plaintext_size", read_only=True)
-
-    class Meta:
-        model = FileShare
-        fields = ["id", "patient", "category", "plaintext_size", "created_at", "expires_at", "access_count"]
-        read_only_fields = fields
-
-
 class KeyPairSerializer(serializers.ModelSerializer):
     """One of the user's own key pairs: public parts only.
 
@@ -382,9 +338,6 @@ __all__ = [
     "KeyPairSerializer",
     "PublicKeySerializer",
     "PII_FIELDS",
-    "FileShareSerializer",
-    "ReceivedShareSerializer",
-    "ShareCreateSerializer",
     "DownloadEventSerializer",
     "FileCiphertextSerializer",
     "FileUploadSerializer",

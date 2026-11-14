@@ -21,11 +21,7 @@ urlpatterns = [
     path("files/<int:pk>/ciphertext/", views.FileCiphertextView.as_view(), name="file-ciphertext"),
     path("files/<int:pk>/benchmark/", views.FileBenchmarkView.as_view(), name="file-benchmark"),
     # Sharing (patient side)
-    path("files/<int:pk>/shares/", views.FileShareListCreateView.as_view(), name="file-shares"),
-    path("shares/<int:pk>/", views.FileShareRevokeView.as_view(), name="share-revoke"),
     # Sharing (doctor side)
-    path("shares/received/", views.ReceivedShareListView.as_view(), name="shares-received"),
-    path("shares/received/<int:pk>/open/", views.ReceivedShareOpenView.as_view(), name="share-open"),
     # Analysis
     path("access-requests/", views.AccessRequestListCreateView.as_view(), name="access-requests"),
     path("access-requests/<int:pk>/", views.AccessRequestDetailView.as_view(), name="access-request-detail"),
