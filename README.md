@@ -323,6 +323,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/files/{id}/` | File metadata + per-algorithm ciphertext info |
 | DELETE | `/api/files/{id}/` | Delete a file |
 | POST | `/api/files/{id}/sign/` | Sign a stored PDF with my signing key (created on first use); all three encrypted copies are replaced by encryptions of the signed file; needs the password; 400 not a PDF, 409 already signed |
+| GET | `/api/files/{id}/signature/` | Check a stored PDF's signature (decrypted in memory, against my own certificates): `status` `valid` / `modified` / `unknown_signer` / `invalid` / `unsigned`, plus `intact`, `valid`, `signer`, `coverage`, `modified_after_signing`, `signed_at`; needs the password; 400 if not a PDF |
 | GET | `/api/files/{id}/download/?algorithm=DES&inline=1` | Decrypt and download; `inline=1` serves safe types (PDF, images, video, text) for in-browser preview |
 | GET | `/api/files/{id}/ciphertext/?algorithm=DES` | Download the stored copy as-is (ciphertext), keeping the original extension (`lab.DES-encrypted.pdf`); needs the password |
 | GET | `/api/files/{id}/benchmark/?algorithm=AES&runs=10` | N timed decryptions (total and cipher-only samples) |

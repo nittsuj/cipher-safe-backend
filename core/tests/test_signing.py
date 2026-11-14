@@ -355,3 +355,54 @@ class VerifyPdfTests(SimpleTestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Verification successful", result.stderr)
+
+
+class SignatureStatusApiTests(PdfUploadHelpers):
+    """GET /api/files/{id}/signature/."""
+
+    def _status(self, file_id):
+        return self.client.get(f"/api/files/{file_id}/signature/")
+
+    def test_signed_record_is_valid(self):
+        file_id = self._upload_pdf().json()["id"]
+        response = self._status(file_id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(body["status"], "valid")
+        self.assertEqual(body["signer"]["common_name"], "alice")
+        self.assertTrue(body["signer_matches_owner"])
+        self.assertEqual(body["coverage"], "ENTIRE_FILE")
+        self.assertIsNotNone(body["signed_at"])
+        pair = UserKeyPair.objects.get(purpose=KEY_PURPOSE_SIGNING)
+        self.assertEqual(body["signer"]["fingerprint"], pair.fingerprint)
+
+    def test_still_valid_after_the_key_is_rotated(self):
+        file_id = self._upload_pdf().json()["id"]
+        self.client.post("/api/me/keys/", {"purpose": "SIGNING", "rotate": True}, format="json")
+        self.assertEqual(self._status(file_id).json()["status"], "valid")
+
+    def test_unsigned_pdf_reports_unsigned(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        body = self._status(file_id).json()
+        self.assertEqual((body["status"], body["signed"], body["signed_at"]), ("unsigned", False, None))
+
+    def test_pdf_signed_by_someone_else_is_unknown_signer(self):
+        other_key = generate_rsa_key_pair()
+        foreign, _ = sign_pdf(SAMPLE, other_key, build_signing_certificate(other_key, "mallory"), "mallory")
+        file_id = self._upload_pdf(data=foreign, sign=False).json()["id"]
+        body = self._status(file_id).json()
+        self.assertEqual(body["status"], "unknown_signer")
+        self.assertEqual(body["signer"]["common_name"], "mallory")
+
+    def test_non_pdf_is_400(self):
+        file_id = self._upload_pdf(data=b"plain", sign=False, content_type="text/plain", name="a.txt").json()["id"]
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_needs_password_and_ownership(self):
+        file_id = self._upload_pdf().json()["id"]
+        self._auth(password="not-the-password")
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_403_FORBIDDEN)
+        User.objects.create_user("citra", password=PASSWORD)
+        login = self.client.post("/api/auth/login/", {"username": "citra", "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_404_NOT_FOUND)

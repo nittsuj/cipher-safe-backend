@@ -39,7 +39,7 @@ from .constants import (
     REQUEST_REVOKED,
     SUPPORTED_ALGORITHMS,
 )
-from .signing import AlreadySigned, NotAPdf, is_pdf, sign_pdf
+from .signing import AlreadySigned, NotAPdf, VerificationResult, is_pdf, sign_pdf, verify_pdf
 from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
@@ -719,3 +719,32 @@ def sign_stored_pdf(stored_file: StoredFile, password: str) -> StoredFile:
             sign_ms=signed.sign_ms,
         )
     return StoredFile.objects.select_related("signature").get(pk=stored_file.pk)
+
+
+def owner_certificates(owner) -> list:
+    """Every signing certificate the owner has had (rotated ones included), so
+    PDFs signed before a rotation still count as theirs."""
+
+    pairs = UserKeyPair.objects.filter(user=owner, purpose=KEY_PURPOSE_SIGNING).exclude(certificate_pem="")
+    return [load_certificate(pair.certificate_pem) for pair in pairs]
+
+
+def verify_pdf_bytes(owner, data: bytes) -> dict:
+    """Check a PDF's signature against the owner's certificates; the API shape.
+
+    Raises :class:`core.signing.NotAPdf` for bytes that aren't a PDF.
+    """
+
+    result: VerificationResult = verify_pdf(data, owner_certificates(owner))
+    key_log.info("verify owner=%s status=%s verify_ms=%.3f", owner.pk, result.status, result.verify_ms)
+    return result.as_dict()
+
+
+def verify_stored_file(stored_file: StoredFile, password: str) -> dict:
+    """Decrypt a stored record in memory and check its signature."""
+
+    data = decrypt_file(stored_file.ciphertexts.get(algorithm="AES"), password).plaintext
+    report = verify_pdf_bytes(stored_file.owner, data)
+    signature = PdfSignature.objects.filter(file=stored_file).first()
+    report["signed_at"] = signature.signed_at if signature else None
+    return report

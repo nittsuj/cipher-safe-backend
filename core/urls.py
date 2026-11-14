@@ -20,6 +20,7 @@ urlpatterns = [
     path("files/", views.FileListCreateView.as_view(), name="file-list"),
     path("files/<int:pk>/", views.FileDetailView.as_view(), name="file-detail"),
     path("files/<int:pk>/sign/", views.FileSignView.as_view(), name="file-sign"),
+    path("files/<int:pk>/signature/", views.FileSignatureView.as_view(), name="file-signature"),
     path("files/<int:pk>/download/", views.FileDownloadView.as_view(), name="file-download"),
     path("files/<int:pk>/ciphertext/", views.FileCiphertextView.as_view(), name="file-ciphertext"),
     path("files/<int:pk>/benchmark/", views.FileBenchmarkView.as_view(), name="file-benchmark"),
