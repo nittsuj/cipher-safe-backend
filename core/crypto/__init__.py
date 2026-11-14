@@ -11,6 +11,13 @@ AES-GCM with raw random keys in :mod:`core.crypto.symmetric`.
 
 from .algorithms import GCM_TAG_SIZE, TAG_SIZE, DecryptionResult, EncryptionResult, IntegrityError, decrypt, encrypt
 from .asymmetric import (
+    ENVELOPE_PREFIX,
+    Envelope,
+    envelope_digest,
+    format_envelope,
+    parse_envelope,
+    unwrap_key,
+    wrap_key,
     RSA_ALGORITHM,
     WrappedKey,
     fingerprint,
@@ -32,6 +39,13 @@ from .symmetric import (
 from .keys import PBKDF2_ROUNDS, SALT_SIZE, derive_key, derive_keys, new_salt
 
 __all__ = [
+    "ENVELOPE_PREFIX",
+    "Envelope",
+    "envelope_digest",
+    "format_envelope",
+    "parse_envelope",
+    "unwrap_key",
+    "wrap_key",
     "AEAD_MODES",
     "GCM_TAG_SIZE",
     "DEFAULT_MODE",

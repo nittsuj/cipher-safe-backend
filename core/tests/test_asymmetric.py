@@ -5,14 +5,21 @@ from django.test import SimpleTestCase
 
 from ..crypto import (
     RSA_ALGORITHM,
+    Envelope,
     IntegrityError,
     WrappedKey,
+    envelope_digest,
+    format_envelope,
     fingerprint,
     generate_rsa_key_pair,
     key_pair_aad,
     load_public_key,
+    new_symmetric_key,
+    parse_envelope,
     public_key_pem,
+    unwrap_key,
     unwrap_private_key,
+    wrap_key,
     wrap_private_key,
 )
 
@@ -102,3 +109,63 @@ class RsaKeyPairTests(SimpleTestCase):
         )
         with self.assertRaises(ValueError):
             load_public_key(pem)
+
+
+class KeyWrappingTests(SimpleTestCase):
+    """RSA-OAEP wrapping of per-item AES keys, and the envelope text format."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.requester = generate_rsa_key_pair()
+        cls.someone_else = generate_rsa_key_pair()
+        cls.key = new_symmetric_key()
+        cls.wrapped = wrap_key(cls.requester.public_key(), cls.key)
+
+    def test_wrap_unwrap_round_trip(self):
+        self.assertEqual(unwrap_key(self.requester, self.wrapped), self.key)
+
+    def test_wrapped_key_is_rsa_sized_and_randomised(self):
+        self.assertEqual(len(self.wrapped), 384)  # RSA-3072 output
+        self.assertNotIn(self.key, self.wrapped)
+        self.assertNotEqual(wrap_key(self.requester.public_key(), self.key), self.wrapped)  # OAEP is randomised
+
+    def test_only_the_requester_can_unwrap(self):
+        with self.assertRaises(IntegrityError):
+            unwrap_key(self.someone_else, self.wrapped)
+
+    def test_modified_wrapped_key_fails(self):
+        broken = bytearray(self.wrapped)
+        broken[-1] ^= 0x01
+        with self.assertRaises(IntegrityError):
+            unwrap_key(self.requester, bytes(broken))
+
+    def test_envelope_round_trip(self):
+        text = format_envelope(7, 42, self.wrapped)
+        self.assertTrue(text.startswith("CSK1.7.42."))
+        self.assertLess(len(text), 600)
+        self.assertEqual(parse_envelope(text), Envelope(7, 42, self.wrapped))
+
+    def test_envelope_ignores_whitespace_from_chat_apps(self):
+        text = format_envelope(7, 42, self.wrapped)
+        broken_up = "  " + text[:100] + "\n" + text[100:300] + " \r\n" + text[300:] + "\n"
+        self.assertEqual(parse_envelope(broken_up).wrapped_key, self.wrapped)
+
+    def test_bad_envelopes_are_rejected(self):
+        good = format_envelope(7, 42, self.wrapped)
+        bad = [
+            "",
+            "hello",
+            good.replace("CSK1", "CSK2", 1),
+            "CSK1.x.42.abc",
+            "CSK1.7.42.",
+            "CSK1.7.42.a.b",
+            "CSK1.7.42.@@@",
+        ]
+        for text in bad:
+            with self.subTest(text=text[:20]), self.assertRaises(ValueError):
+                parse_envelope(text)
+
+    def test_digest_identifies_the_wrapped_key(self):
+        self.assertRegex(envelope_digest(self.wrapped), r"^[0-9a-f]{64}$")
+        self.assertNotEqual(envelope_digest(self.wrapped), envelope_digest(self.wrapped[:-1] + b"\x00"))

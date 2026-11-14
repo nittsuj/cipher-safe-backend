@@ -10,18 +10,26 @@ private key is encrypted with AES-256-GCM under that KEK.
 Associated data binds a wrapped key to its owner and purpose, so a blob copied
 to another user or purpose fails the GCM check instead of decrypting.
 
+The public key also **wraps** symmetric keys with RSA-OAEP: a shared item's
+AES key is encrypted for the requester and handed over as a short text
+*envelope* (``CSK1.<request>.<item>.<base64url>``) the owner can paste into
+WhatsApp or an email. Only the requester's private key opens it.
+
 Uses the ``cryptography`` package for RSA and AES-GCM. Like the rest of
 :mod:`core.crypto`, this module has no Django imports.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import secrets
 from typing import NamedTuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .algorithms import IntegrityError
@@ -121,3 +129,73 @@ def unwrap_private_key(wrapped: WrappedKey, password: str, aad: bytes) -> rsa.RS
     if not isinstance(key, rsa.RSAPrivateKey):
         raise IntegrityError("Stored key is not an RSA private key.")
     return key
+
+
+# ------------------------------------------------------ key wrapping (OAEP)
+
+#: Prefix and version of the envelope text format.
+ENVELOPE_PREFIX = "CSK1"
+
+
+def _oaep() -> padding.OAEP:
+    """RSA-OAEP with SHA-256 and MGF1-SHA-256, no label."""
+
+    return padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None)
+
+
+def wrap_key(public_key: rsa.RSAPublicKey, key: bytes) -> bytes:
+    """Encrypt a symmetric key for the holder of ``public_key`` (RSA-OAEP)."""
+
+    return public_key.encrypt(key, _oaep())
+
+
+def unwrap_key(private_key: rsa.RSAPrivateKey, wrapped: bytes) -> bytes:
+    """Decrypt a wrapped symmetric key. Raises :class:`IntegrityError` if this
+    private key can't open it (wrong recipient or modified envelope)."""
+
+    try:
+        return private_key.decrypt(wrapped, _oaep())
+    except ValueError as exc:
+        raise IntegrityError("This key can't be opened with your private key.") from exc
+
+
+class Envelope(NamedTuple):
+    """A parsed envelope: which request and item it is for, and the wrapped key."""
+
+    request_id: int
+    item_id: int
+    wrapped_key: bytes
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def format_envelope(request_id: int, item_id: int, wrapped_key: bytes) -> str:
+    """The text the owner sends out of band: ``CSK1.<request>.<item>.<base64url>``."""
+
+    return f"{ENVELOPE_PREFIX}.{request_id}.{item_id}.{_b64url(wrapped_key)}"
+
+
+def parse_envelope(text: str) -> Envelope:
+    """Parse an envelope pasted by the requester. Whitespace (line breaks from
+    chat apps) is ignored. Raises ``ValueError`` if the format is wrong."""
+
+    compact = "".join(text.split())
+    parts = compact.split(".")
+    if len(parts) != 4 or parts[0] != ENVELOPE_PREFIX or not parts[1].isdigit() or not parts[2].isdigit():
+        raise ValueError("This doesn't look like a Cipher Safe key.")
+    try:
+        wrapped = base64.urlsafe_b64decode(parts[3] + "=" * (-len(parts[3]) % 4))
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("This doesn't look like a Cipher Safe key.") from exc
+    if not wrapped:
+        raise ValueError("This doesn't look like a Cipher Safe key.")
+    return Envelope(int(parts[1]), int(parts[2]), wrapped)
+
+
+def envelope_digest(wrapped_key: bytes) -> str:
+    """SHA-256 (hex) of a wrapped key. Stored instead of the envelope, so a
+    pasted envelope can be checked before any RSA work."""
+
+    return hashlib.sha256(wrapped_key).hexdigest()
