@@ -7,6 +7,9 @@ from django.utils import timezone
 from .constants import (
     ALGORITHM_CHOICES,
     FILE_CATEGORY_CHOICES,
+    GRANT_KIND_CHOICES,
+    GRANT_KIND_FILE,
+    GRANT_KIND_PROFILE,
     KEY_PURPOSE_CHOICES,
     REQUEST_CATEGORY_CHOICES,
     REQUEST_PENDING,
@@ -14,7 +17,7 @@ from .constants import (
     ROLE_CHOICES,
     ROLE_PATIENT,
 )
-from .crypto import RSA_ALGORITHM, WrappedKey
+from .crypto import RSA_ALGORITHM, SealedData, WrappedKey
 from .crypto import decrypt as decrypt_payload
 
 
@@ -350,3 +353,93 @@ class AccessRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.requester} -> {self.owner} ({self.status})"
+
+
+class GrantedItem(models.Model):
+    """One thing an owner granted on an approved request: a record or a
+    snapshot of their profile.
+
+    ``blob`` is a separate copy of the item, encrypted with AES-256-GCM under
+    a fresh random key that belongs to this item only (see :class:`SharedKey`).
+    For a record the payload also holds its name and type, so they stay
+    encrypted too.
+    """
+
+    request = models.ForeignKey(AccessRequest, on_delete=models.CASCADE, related_name="items")
+    kind = models.CharField(max_length=7, choices=GRANT_KIND_CHOICES)
+    file = models.ForeignKey(StoredFile, on_delete=models.CASCADE, null=True, blank=True, related_name="grants")
+    blob = models.FileField(upload_to="grants/%Y/%m/")
+    nonce = models.BinaryField()
+    plaintext_size = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    access_count = models.PositiveIntegerField(default=0)
+    last_accessed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["id"]
+        constraints = [
+            # A record item points at its record; a profile snapshot doesn't.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(kind=GRANT_KIND_FILE, file__isnull=False)
+                    | models.Q(kind=GRANT_KIND_PROFILE, file__isnull=True)
+                ),
+                name="grant_kind_matches_file",
+            ),
+            models.UniqueConstraint(fields=["request", "file"], name="uniq_grant_per_file"),
+            models.UniqueConstraint(
+                fields=["request"], condition=models.Q(kind=GRANT_KIND_PROFILE), name="uniq_profile_grant"
+            ),
+        ]
+
+    @property
+    def aad(self) -> bytes:
+        """Associated data for the item copy: binds it to its request, item and kind."""
+
+        return f"cipher-safe/grant:{self.request_id}:{self.pk}:{self.kind}".encode("ascii")
+
+    def sealed(self) -> SealedData:
+        self.blob.seek(0)
+        return SealedData(bytes(self.nonce), bytes(self.blob.read()))
+
+    def __str__(self) -> str:
+        return f"Grant {self.pk} ({self.kind}) on request {self.request_id}"
+
+
+class SharedKey(models.Model):
+    """The random AES key of one granted item, stored only in wrapped form.
+
+    * ``key_for_owner``: the key encrypted with the **owner's** password-derived
+      key, so the owner can show the envelope again without a new key.
+    * ``key_for_requester``: the same key under the **requester's**
+      password-derived key, written when they redeem the envelope.
+    * ``envelope_sha256``: hash of the RSA-wrapped key, to check a pasted
+      envelope. The envelope itself isn't stored.
+
+    The plain key is never stored.
+    """
+
+    item = models.OneToOneField(GrantedItem, on_delete=models.CASCADE, related_name="shared_key")
+    key_for_owner = models.BinaryField()
+    owner_salt = models.BinaryField()
+    owner_nonce = models.BinaryField()
+    key_for_requester = models.BinaryField(null=True, blank=True)
+    requester_salt = models.BinaryField(null=True, blank=True)
+    requester_nonce = models.BinaryField(null=True, blank=True)
+    envelope_sha256 = models.CharField(max_length=64)
+    #: The public key the envelope was made for; kept even after rotation.
+    requester_key = models.ForeignKey(UserKeyPair, on_delete=models.PROTECT, related_name="shared_keys")
+    redeemed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def aad(self, side: str) -> bytes:
+        """Associated data for one stored copy of the key (``owner`` or ``requester``)."""
+
+        return f"cipher-safe/sharedkey:{self.item_id}:{side}".encode("ascii")
+
+    @property
+    def redeemed(self) -> bool:
+        return self.redeemed_at is not None
+
+    def __str__(self) -> str:
+        return f"Key for grant {self.item_id}"

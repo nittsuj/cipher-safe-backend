@@ -50,6 +50,11 @@ REQUEST_STATUS_CHOICES = [
 REQUEST_CATEGORY_PROFILE = "PROFILE"
 REQUEST_CATEGORY_CHOICES = FILE_CATEGORY_CHOICES + [(REQUEST_CATEGORY_PROFILE, "Patient profile")]
 
+#: What a granted item holds: one stored record, or a snapshot of the profile.
+GRANT_KIND_FILE = "FILE"
+GRANT_KIND_PROFILE = "PROFILE"
+GRANT_KIND_CHOICES = [(GRANT_KIND_FILE, "Record"), (GRANT_KIND_PROFILE, "Profile snapshot")]
+
 #: Content types the browser may render inline in a preview. Anything else
 #: (HTML, SVG, ...) could run script, so it is only offered as a download.
 PREVIEWABLE_TYPES = (
@@ -65,6 +70,9 @@ PREVIEWABLE_TYPES = (
 )
 
 __all__ = [
+    "GRANT_KIND_CHOICES",
+    "GRANT_KIND_FILE",
+    "GRANT_KIND_PROFILE",
     "REQUEST_APPROVED",
     "REQUEST_CANCELLED",
     "REQUEST_CATEGORY_CHOICES",

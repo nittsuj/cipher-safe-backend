@@ -4,6 +4,7 @@ from django.contrib.auth.admin import UserAdmin
 from .models import (
     AccessRequest,
     FileShare,
+    GrantedItem,
     DownloadEvent,
     EncryptedValue,
     FileCiphertext,
@@ -74,6 +75,12 @@ class AccessRequestAdmin(admin.ModelAdmin):
     list_display = ("id", "requester", "owner", "category", "status", "created_at", "decided_at")
     list_filter = ("status", "category")
     search_fields = ("requester__username", "owner__username")
+
+
+@admin.register(GrantedItem)
+class GrantedItemAdmin(admin.ModelAdmin):
+    list_display = ("id", "request", "kind", "file", "plaintext_size", "access_count", "created_at")
+    list_filter = ("kind",)
 
 
 admin.site.register(PersonalData)
