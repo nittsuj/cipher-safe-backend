@@ -75,6 +75,7 @@ from .services import (
     log_download,
     open_item,
     redeem_item,
+    revoke_request,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -645,16 +646,23 @@ def _request_for(user, pk: int) -> AccessRequest:
 
 
 class AccessRequestDetailView(APIView):
-    """``DELETE``: the requester cancels a pending request (the row is kept,
-    status ``CANCELLED``)."""
+    """``DELETE`` ends a request; the row is kept with its new status.
+
+    * The requester cancels a pending request (``CANCELLED``).
+    * The owner revokes an approved one (``REVOKED``): every granted copy and
+      its keys are deleted. A pending request is denied instead, not revoked.
+    """
 
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, pk: int):
         access_request = _request_for(request.user, pk)
-        if access_request.requester_id != request.user.pk:
-            raise PermissionDenied("Only the requester can cancel a request.")
-        cancel_request(access_request)
+        if access_request.requester_id == request.user.pk:
+            cancel_request(access_request)
+        elif access_request.status == REQUEST_APPROVED:
+            revoke_request(access_request)
+        else:
+            raise PermissionDenied("Only the requester can cancel a request; deny it instead.")
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

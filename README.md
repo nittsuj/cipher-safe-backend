@@ -195,6 +195,10 @@ generated on first use and can be rotated; the old pair stays, inactive.
 | Associated data | `cipher-safe/keypair:<user id>:<purpose>`, so a stored key can't be moved to another user or purpose |
 | In use | Decrypted in memory, for one request, with the password the client sends |
 
+Granted access ends after the chosen period (1 hour to 1 week): every item
+endpoint then returns 404. `python manage.py purge_expired_grants` deletes the
+expired copies and keys; run it regularly (e.g. from cron).
+
 Changing the password would need every private key re-wrapped; there is no
 password change, so this is a known limitation.
 
@@ -310,7 +314,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | POST | `/api/access-requests/` | Ask a user for their data (`owner`, optional `message`, `category`: a record category or `PROFILE`); any role to any role; one pending request per pair |
 | GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first |
 | POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |
-| DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (kept as `CANCELLED`); 404 if you're not part of the request, 409 if it's no longer pending |
+| DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (`CANCELLED`); owner revokes an approved one (`REVOKED`, every granted copy and key deleted); 404 if you're not part of the request, 409 if the status doesn't allow it |
 | POST | `/api/access-requests/{id}/approve/` | Owner grants a pending request (`file_ids`, `include_profile`, `expires_hours` 1-168); needs the password; returns one envelope per item (the item key encrypted with the requester's RSA public key) and the requester's key fingerprint; 409 if the requester has no encryption key yet |
 | GET | `/api/access-requests/{id}/items/{item_id}/envelope/` | Owner shows an item's envelope again (the same text); needs the password |
 | POST | `/api/access-requests/{id}/items/{item_id}/redeem/` | Requester enters the envelope (`envelope`); needs their password; 400 malformed or for another item, 403 not this item's envelope, 409 can't be opened; throttled |

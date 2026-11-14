@@ -35,6 +35,7 @@ from .constants import (
     REQUEST_CANCELLED,
     REQUEST_DENIED,
     REQUEST_PENDING,
+    REQUEST_REVOKED,
     SUPPORTED_ALGORITHMS,
 )
 from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
@@ -646,3 +647,41 @@ def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str
     if item.kind == GRANT_KIND_PROFILE:
         return {"name": "profile.json", "content_type": "application/json"}, payload
     return unpack_share_payload(payload)
+
+
+
+# ------------------------------------------------- ending access
+
+
+def revoke_request(access_request: AccessRequest) -> AccessRequest:
+    """The owner ends an approved request early.
+
+    Deletes every granted copy and its keys (the files on disk go through the
+    ``post_delete`` handler), so nothing the requester could open is left.
+    """
+
+    with transaction.atomic():
+        locked = AccessRequest.objects.select_for_update().get(pk=access_request.pk)
+        if locked.status != REQUEST_APPROVED:
+            raise InvalidTransition(f"This request is already {locked.status.lower()}.")
+        locked.items.all().delete()
+        locked.status = REQUEST_REVOKED
+        locked.decided_at = timezone.now()
+        locked.save(update_fields=["status", "decided_at"])
+    return locked
+
+
+def purge_expired_grants(now=None) -> int:
+    """Delete the copies and keys of approved requests whose access has ended.
+
+    Expired items are already refused by every endpoint; this removes the
+    data itself. Returns how many items were deleted. Run it regularly
+    (``manage.py purge_expired_grants``).
+    """
+
+    now = now or timezone.now()
+    expired = GrantedItem.objects.filter(request__status=REQUEST_APPROVED, request__expires_at__lte=now)
+    count = expired.count()
+    with transaction.atomic():
+        expired.delete()
+    return count

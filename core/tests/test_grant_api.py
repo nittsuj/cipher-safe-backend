@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import os
 from datetime import timedelta
+from io import StringIO
 
+from django.core.management import call_command
 from django.utils import timezone
 from rest_framework import status
 
 from ..crypto import parse_envelope
-from ..models import AccessRequest, GrantedItem, PersonalData, User
-from ..services import ensure_key_pair, store_personal_data
+from ..models import AccessRequest, GrantedItem, PersonalData, SharedKey, User
+from ..services import ensure_key_pair, purge_expired_grants, store_personal_data
 
 from .base import PASSWORD, AuthenticatedApiTestCase
 
@@ -217,3 +220,64 @@ class RedeemAndOpenApiTests(AuthenticatedApiTestCase):
     def test_redeem_is_throttled(self):
         codes = [self._redeem(self.file_item, "hello").status_code for _ in range(11)]
         self.assertEqual(codes[-1], status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class RevokeAndExpiryTests(AuthenticatedApiTestCase):
+    """The owner revokes; expired access is refused and can be purged."""
+
+    def setUp(self):
+        super().setUp()
+        budi = User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        ensure_key_pair(budi, "ENCRYPTION", PASSWORD)
+        file_id = self._upload()["id"]
+        alice = User.objects.get(username="alice")
+        self.request_id = AccessRequest.objects.create(requester=budi, owner=alice).pk
+        self.item = self.client.post(
+            f"/api/access-requests/{self.request_id}/approve/", {"file_ids": [file_id]}, format="json"
+        ).json()["items"][0]
+
+    def _as(self, username):
+        login = self.client.post("/api/auth/login/", {"username": username, "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+
+    def _blob_path(self):
+        return GrantedItem.objects.get(pk=self.item["item_id"]).blob.path
+
+    def test_owner_revokes_and_everything_is_deleted(self):
+        path = self._blob_path()
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.delete(f"/api/access-requests/{self.request_id}/")
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(AccessRequest.objects.get(pk=self.request_id).status, "REVOKED")
+        self.assertFalse(GrantedItem.objects.exists())
+        self.assertFalse(SharedKey.objects.exists())
+        self.assertFalse(os.path.exists(path))
+
+    def test_requester_cannot_open_after_revocation(self):
+        self.client.delete(f"/api/access-requests/{self.request_id}/")
+        self._as("budi")
+        url = f"/api/access-requests/{self.request_id}/items/{self.item['item_id']}/"
+        response = self.client.post(url + "redeem/", {"envelope": self.item["envelope"]}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self.client.get(url).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_revoking_twice_gets_409(self):
+        self.client.delete(f"/api/access-requests/{self.request_id}/")
+        self.assertEqual(self.client.delete(f"/api/access-requests/{self.request_id}/").status_code, 409)
+
+    def test_requester_cannot_revoke(self):
+        self._as("budi")
+        response = self.client.delete(f"/api/access-requests/{self.request_id}/")
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)  # cancel only works while pending
+        self.assertEqual(GrantedItem.objects.count(), 1)
+
+    def test_purge_deletes_only_expired_items(self):
+        path = self._blob_path()
+        self.assertEqual(purge_expired_grants(), 0)
+        AccessRequest.objects.filter(pk=self.request_id).update(expires_at=timezone.now() - timedelta(seconds=1))
+        with self.captureOnCommitCallbacks(execute=True):
+            out = StringIO()
+            call_command("purge_expired_grants", stdout=out)
+        self.assertIn("Deleted 1 expired", out.getvalue())
+        self.assertFalse(GrantedItem.objects.exists())
+        self.assertFalse(os.path.exists(path))
