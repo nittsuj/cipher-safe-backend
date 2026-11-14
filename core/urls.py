@@ -30,6 +30,16 @@ urlpatterns = [
     path("access-requests/", views.AccessRequestListCreateView.as_view(), name="access-requests"),
     path("access-requests/<int:pk>/", views.AccessRequestDetailView.as_view(), name="access-request-detail"),
     path("access-requests/<int:pk>/deny/", views.AccessRequestDenyView.as_view(), name="access-request-deny"),
+    path(
+        "access-requests/<int:pk>/approve/",
+        views.AccessRequestApproveView.as_view(),
+        name="access-request-approve",
+    ),
+    path(
+        "access-requests/<int:pk>/items/<int:item_id>/envelope/",
+        views.GrantedItemEnvelopeView.as_view(),
+        name="granted-item-envelope",
+    ),
     path("analysis/downloads/", views.DownloadHistoryView.as_view(), name="download-history"),
     path("analysis/timings/", views.TimingAnalysisView.as_view(), name="timing-analysis"),
 ]

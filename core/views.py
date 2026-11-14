@@ -11,7 +11,7 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.utils.http import content_disposition_header
 from rest_framework import status
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -23,6 +23,7 @@ from .constants import (
     KEY_PURPOSE_CHOICES,
     KEY_PURPOSE_ENCRYPTION,
     PREVIEWABLE_TYPES,
+    REQUEST_APPROVED,
     ROLE_DOCTOR,
     ROLE_PATIENT,
     SUPPORTED_ALGORITHMS,
@@ -30,6 +31,7 @@ from .constants import (
 from .crypto import IntegrityError
 from .models import (
     AccessRequest,
+    GrantedItem,
     DownloadEvent,
     FileCiphertext,
     FileShare,
@@ -39,6 +41,7 @@ from .models import (
     UserKeyPair,
 )
 from .serializers import (
+    ApproveRequestSerializer,
     AccessRequestCreateSerializer,
     AccessRequestSerializer,
     PII_FIELDS,
@@ -61,12 +64,14 @@ from .services import (
     decrypt_file,
     delete_share,
     ensure_key_pair,
+    envelope_for_owner,
     open_share,
     decrypt_file_label,
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
     rotate_key_pair,
+    approve_request,
     benchmark_decryption,
     cancel_request,
     deny_request,
@@ -658,3 +663,77 @@ class AccessRequestDenyView(APIView):
         if access_request.owner_id != request.user.pk:
             raise PermissionDenied("Only the owner can deny a request.")
         return Response(AccessRequestSerializer(deny_request(access_request)).data)
+
+
+def _owned_request(user, pk: int) -> AccessRequest:
+    """A request where ``user`` is the owner. Outsiders get 404, the requester 403."""
+
+    access_request = _request_for(user, pk)
+    if access_request.owner_id != user.pk:
+        raise PermissionDenied("Only the owner can do this.")
+    return access_request
+
+
+def _live_item(access_request: AccessRequest, item_id: int) -> GrantedItem:
+    """An item of an approved, unexpired request; 404 otherwise."""
+
+    if access_request.status != REQUEST_APPROVED or access_request.expired:
+        raise NotFound("This access has ended.")
+    items = GrantedItem.objects.select_related("shared_key__requester_key")
+    return get_object_or_404(items, request=access_request, pk=item_id)
+
+
+class AccessRequestApproveView(APIView):
+    """The owner grants a pending request.
+
+    Each chosen record (and optionally the profile) gets its own random AES-256
+    key and encrypted copy; each key is encrypted with the requester's RSA
+    public key. The response holds those envelopes for the owner to send out
+    of band. Needs the owner's password to decrypt what is granted.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        access_request = _owned_request(request.user, pk)
+        serializer = ApproveRequestSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        approved, requester_pair, grants = approve_request(
+            access_request, password, data["file_ids"], data["include_profile"], data["expires_hours"]
+        )
+        return Response(
+            {
+                "request": AccessRequestSerializer(approved).data,
+                "recipient_fingerprint": requester_pair.fingerprint,
+                "items": [
+                    {
+                        "item_id": item.pk,
+                        "kind": item.kind,
+                        "category": item.file.category if item.file else None,
+                        "envelope": envelope,
+                    }
+                    for item, envelope in grants
+                ],
+            }
+        )
+
+
+class GrantedItemEnvelopeView(APIView):
+    """The owner shows an item's envelope again: the same text as at approval,
+    so a copy already sent keeps working. Needs the owner's password."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _live_item(_owned_request(request.user, pk), item_id)
+        return Response(
+            {
+                "item_id": item.pk,
+                "kind": item.kind,
+                "envelope": envelope_for_owner(item, password),
+                "recipient_fingerprint": item.shared_key.requester_key.fingerprint,
+            }
+        )

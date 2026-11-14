@@ -311,6 +311,8 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first |
 | POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |
 | DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (kept as `CANCELLED`); 404 if you're not part of the request, 409 if it's no longer pending |
+| POST | `/api/access-requests/{id}/approve/` | Owner grants a pending request (`file_ids`, `include_profile`, `expires_hours` 1-168); needs the password; returns one envelope per item (the item key encrypted with the requester's RSA public key) and the requester's key fingerprint; 409 if the requester has no encryption key yet |
+| GET | `/api/access-requests/{id}/items/{item_id}/envelope/` | Owner shows an item's envelope again (the same text); needs the password |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 

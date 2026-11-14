@@ -317,7 +317,30 @@ class AccessRequestCreateSerializer(serializers.Serializer):
         return AccessRequest.objects.create(requester=self.context["request"].user, **validated_data)
 
 
+class ApproveRequestSerializer(serializers.Serializer):
+    """What the owner grants: some of their records and/or a profile snapshot."""
+
+    file_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False, default=list)
+    include_profile = serializers.BooleanField(default=False)
+    expires_hours = serializers.IntegerField(min_value=1, max_value=168, default=24)
+
+    def validate_file_ids(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("A record is listed twice.")
+        owner = self.context["request"].user
+        files = list(StoredFile.objects.filter(owner=owner, pk__in=value))
+        if len(files) != len(value):
+            raise serializers.ValidationError("Every record must be one of yours.")
+        return files
+
+    def validate(self, attrs):
+        if not attrs["file_ids"] and not attrs["include_profile"]:
+            raise serializers.ValidationError("Choose at least one record or the profile.")
+        return attrs
+
+
 __all__ = [
+    "ApproveRequestSerializer",
     "AccessRequestCreateSerializer",
     "AccessRequestSerializer",
     "KeyPairCreateSerializer",
