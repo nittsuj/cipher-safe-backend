@@ -24,7 +24,8 @@ from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
 from django.utils import timezone
 
-from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
+from .constants import MODE_FOR, REQUEST_CANCELLED, REQUEST_DENIED, REQUEST_PENDING, SUPPORTED_ALGORITHMS
+from .exceptions import InvalidTransition
 from .crypto import (
     encrypt,
     fingerprint,
@@ -35,6 +36,7 @@ from .crypto import (
     wrap_private_key,
 )
 from .models import (
+    AccessRequest,
     DownloadEvent,
     EncryptedValue,
     FileCiphertext,
@@ -385,3 +387,34 @@ def load_private_key(pair: UserKeyPair, password: str):
     """
 
     return unwrap_private_key(pair.wrapped, password, key_pair_aad(pair.user_id, pair.purpose))
+
+
+# ---------------------------------------------------------- access requests
+
+
+def _decide(access_request: AccessRequest, allowed_from: str, new_status: str) -> AccessRequest:
+    """Move a request to ``new_status`` if it is still in ``allowed_from``.
+
+    The row is locked, so a deny and a cancel arriving together can't both win.
+    """
+
+    with transaction.atomic():
+        locked = AccessRequest.objects.select_for_update().get(pk=access_request.pk)
+        if locked.status != allowed_from:
+            raise InvalidTransition(f"This request is already {locked.status.lower()}.")
+        locked.status = new_status
+        locked.decided_at = timezone.now()
+        locked.save(update_fields=["status", "decided_at"])
+    return locked
+
+
+def deny_request(access_request: AccessRequest) -> AccessRequest:
+    """Owner refuses a pending request."""
+
+    return _decide(access_request, REQUEST_PENDING, REQUEST_DENIED)
+
+
+def cancel_request(access_request: AccessRequest) -> AccessRequest:
+    """Requester withdraws a pending request."""
+
+    return _decide(access_request, REQUEST_PENDING, REQUEST_CANCELLED)

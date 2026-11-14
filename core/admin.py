@@ -1,7 +1,17 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 
-from .models import AccessRequest, FileShare, DownloadEvent, EncryptedValue, FileCiphertext, PersonalData, StoredFile, User, UserKeyPair
+from .models import (
+    AccessRequest,
+    FileShare,
+    DownloadEvent,
+    EncryptedValue,
+    FileCiphertext,
+    PersonalData,
+    StoredFile,
+    User,
+    UserKeyPair,
+)
 
 
 @admin.register(StoredFile)

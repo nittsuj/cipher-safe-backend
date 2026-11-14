@@ -30,6 +30,15 @@ class IntegrityCheckFailed(APIException):
     default_code = "integrity_check_failed"
 
 
+class InvalidTransition(APIException):
+    """An access request can't move from its current status (e.g. denying a
+    request that was already cancelled)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "This request can't be changed any more."
+    default_code = "invalid_transition"
+
+
 def exception_handler(exc, context):
     """DRF's handler, plus :class:`IntegrityError` -> HTTP 409."""
 

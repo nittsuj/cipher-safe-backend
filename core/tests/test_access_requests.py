@@ -7,7 +7,7 @@ from django.test import TestCase
 from rest_framework import status
 from django.utils import timezone
 
-from ..constants import REQUEST_APPROVED, REQUEST_DENIED, REQUEST_PENDING
+from ..constants import REQUEST_APPROVED, REQUEST_CANCELLED, REQUEST_DENIED, REQUEST_PENDING
 from ..models import AccessRequest, User
 
 from .base import PASSWORD, AuthenticatedApiTestCase
@@ -165,3 +165,79 @@ class AccessRequestCreateListApiTests(AuthenticatedApiTestCase):
         codes = [self._ask(owner=f"user{i}").status_code for i in range(11)]
         self.assertEqual(codes[:10], [status.HTTP_201_CREATED] * 10)
         self.assertEqual(codes[10], status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class AccessRequestDenyCancelApiTests(AuthenticatedApiTestCase):
+    """Deny (owner) and cancel (requester). ``budi`` asks ``alice``."""
+
+    def setUp(self):
+        super().setUp()
+        User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        User.objects.create_user("citra", password=PASSWORD)
+        self._as("budi")
+        self.request_id = self.client.post(
+            "/api/access-requests/", {"owner": "alice"}, format="json"
+        ).json()["id"]
+
+    def _as(self, username):
+        login = self.client.post("/api/auth/login/", {"username": username, "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+
+    def _deny(self):
+        return self.client.post(f"/api/access-requests/{self.request_id}/deny/")
+
+    def _cancel(self):
+        return self.client.delete(f"/api/access-requests/{self.request_id}/")
+
+    def _status(self):
+        return AccessRequest.objects.get(pk=self.request_id).status
+
+    def test_owner_denies(self):
+        self._as("alice")
+        response = self._deny()
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.json()["status"], "DENIED")
+        self.assertIsNotNone(response.json()["decided_at"])
+
+    def test_only_owner_can_deny(self):
+        response = self._deny()  # budi, the requester
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self._status(), REQUEST_PENDING)
+
+    def test_requester_cancels(self):
+        self.assertEqual(self._cancel().status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(self._status(), REQUEST_CANCELLED)
+
+    def test_only_requester_can_cancel(self):
+        self._as("alice")
+        self.assertEqual(self._cancel().status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self._status(), REQUEST_PENDING)
+
+    def test_outsider_gets_404(self):
+        self._as("citra")
+        self.assertEqual(self._deny().status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self._cancel().status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(self._status(), REQUEST_PENDING)
+
+    def test_unknown_id_gets_404(self):
+        self.request_id = 999999
+        self.assertEqual(self._cancel().status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_denied_request_cannot_be_cancelled(self):
+        self._as("alice")
+        self._deny()
+        self._as("budi")
+        response = self._cancel()
+        self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(response.json()["detail"], "This request is already denied.")
+
+    def test_cancelled_request_cannot_be_denied(self):
+        self._cancel()
+        self._as("alice")
+        self.assertEqual(self._deny().status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(self._status(), REQUEST_CANCELLED)
+
+    def test_cancelled_request_allows_a_new_one(self):
+        self._cancel()
+        response = self.client.post("/api/access-requests/", {"owner": "alice"}, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)

@@ -309,6 +309,8 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/shares/received/{id}/open/?inline=1` | Doctor: decrypt with the `X-Share-Key` header |
 | POST | `/api/access-requests/` | Ask a user for their data (`owner`, optional `message`, `category`: a record category or `PROFILE`); any role to any role; one pending request per pair |
 | GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first |
+| POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |
+| DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (kept as `CANCELLED`); 404 if you're not part of the request, 409 if it's no longer pending |
 | GET | `/api/analysis/downloads/` | Download history with timings |
 | GET | `/api/analysis/timings/` | Aggregate timings per algorithm |
 

@@ -5,6 +5,7 @@ import os
 from django.contrib.auth import authenticate
 from django.db import IntegrityError as DatabaseIntegrityError
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -67,6 +68,8 @@ from .services import (
     log_download,
     rotate_key_pair,
     benchmark_decryption,
+    cancel_request,
+    deny_request,
     store_personal_data,
     store_record,
     timing_summary,
@@ -620,3 +623,38 @@ class AccessRequestListCreateView(APIView):
             # Two requests raced past the pending check; the constraint caught it.
             raise ValidationError({"owner": "You already have a pending request to this user."})
         return Response(AccessRequestSerializer(access_request).data, status=status.HTTP_201_CREATED)
+
+
+def _request_for(user, pk: int) -> AccessRequest:
+    """A request the user is part of. Anyone else gets 404, so ids don't leak."""
+
+    return get_object_or_404(
+        AccessRequest.objects.select_related("requester", "owner").filter(Q(requester=user) | Q(owner=user)),
+        pk=pk,
+    )
+
+
+class AccessRequestDetailView(APIView):
+    """``DELETE``: the requester cancels a pending request (the row is kept,
+    status ``CANCELLED``)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, pk: int):
+        access_request = _request_for(request.user, pk)
+        if access_request.requester_id != request.user.pk:
+            raise PermissionDenied("Only the requester can cancel a request.")
+        cancel_request(access_request)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AccessRequestDenyView(APIView):
+    """The owner refuses a pending request."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        access_request = _request_for(request.user, pk)
+        if access_request.owner_id != request.user.pk:
+            raise PermissionDenied("Only the owner can deny a request.")
+        return Response(AccessRequestSerializer(deny_request(access_request)).data)
