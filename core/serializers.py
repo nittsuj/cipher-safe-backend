@@ -16,7 +16,15 @@ from .constants import (
     REQUEST_PENDING,
     ROLE_DOCTOR,
 )
-from .models import AccessRequest, DownloadEvent, FileCiphertext, FileShare, StoredFile, UserKeyPair
+from .models import (
+    AccessRequest,
+    DownloadEvent,
+    FileCiphertext,
+    FileShare,
+    GrantedItem,
+    StoredFile,
+    UserKeyPair,
+)
 
 User = get_user_model()
 
@@ -268,12 +276,32 @@ class PublicKeySerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class GrantedItemSummarySerializer(serializers.ModelSerializer):
+    """What was granted on an approved request, without names or content."""
+
+    item_id = serializers.IntegerField(source="pk", read_only=True)
+    category = serializers.CharField(source="file.category", default=None, read_only=True)
+    redeemed = serializers.SerializerMethodField()
+
+    def get_redeemed(self, obj) -> bool:
+        shared_key = getattr(obj, "shared_key", None)
+        return bool(shared_key and shared_key.redeemed)
+
+    class Meta:
+        model = GrantedItem
+        fields = ["item_id", "kind", "category", "redeemed", "access_count"]
+        read_only_fields = fields
+
+
 class AccessRequestSerializer(serializers.ModelSerializer):
-    """A request as both sides see it. Says nothing about the owner's records."""
+    """A request as both sides see it. Before approval it says nothing about
+    the owner's records; once approved, ``items`` lists what was granted (kind
+    and category only), so the requester knows which keys to enter."""
 
     requester = serializers.CharField(source="requester.username", read_only=True)
     owner = serializers.CharField(source="owner.username", read_only=True)
     expired = serializers.BooleanField(read_only=True)
+    items = GrantedItemSummarySerializer(many=True, read_only=True)
 
     class Meta:
         model = AccessRequest
@@ -288,6 +316,7 @@ class AccessRequestSerializer(serializers.ModelSerializer):
             "decided_at",
             "expires_at",
             "expired",
+            "items",
         ]
         read_only_fields = fields
 
@@ -344,6 +373,7 @@ class RedeemSerializer(serializers.Serializer):
 
 
 __all__ = [
+    "GrantedItemSummarySerializer",
     "RedeemSerializer",
     "ApproveRequestSerializer",
     "AccessRequestCreateSerializer",

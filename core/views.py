@@ -622,7 +622,9 @@ class AccessRequestListCreateView(APIView):
             requests = AccessRequest.objects.filter(requester=request.user)
         else:
             raise ValidationError({"box": "Must be incoming or outgoing."})
-        requests = requests.select_related("requester", "owner")
+        requests = requests.select_related("requester", "owner").prefetch_related(
+            "items__file", "items__shared_key"
+        )
         return Response(AccessRequestSerializer(requests, many=True).data)
 
     def post(self, request):

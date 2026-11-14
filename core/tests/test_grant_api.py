@@ -281,3 +281,53 @@ class RevokeAndExpiryTests(AuthenticatedApiTestCase):
         self.assertIn("Deleted 1 expired", out.getvalue())
         self.assertFalse(GrantedItem.objects.exists())
         self.assertFalse(os.path.exists(path))
+
+
+class RequestItemsListTests(AuthenticatedApiTestCase):
+    """Approved requests list their items (kind, category, redeemed) for both sides."""
+
+    def setUp(self):
+        super().setUp()
+        budi = User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        ensure_key_pair(budi, "ENCRYPTION", PASSWORD)
+        file_id = self._upload()["id"]
+        alice = User.objects.get(username="alice")
+        store_personal_data(PersonalData.objects.create(owner=alice), PASSWORD, {"full_name": "Alice"})
+        self.request_id = AccessRequest.objects.create(requester=budi, owner=alice).pk
+        self.items = self.client.post(
+            f"/api/access-requests/{self.request_id}/approve/",
+            {"file_ids": [file_id], "include_profile": True},
+            format="json",
+        ).json()["items"]
+
+    def _as(self, username):
+        login = self.client.post("/api/auth/login/", {"username": username, "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+
+    def _listed(self, box):
+        [request] = self.client.get("/api/access-requests/", {"box": box}).json()
+        return request["items"]
+
+    def test_both_sides_see_the_items_without_names(self):
+        fresh = {"redeemed": False, "access_count": 0}
+        expected = [
+            {"item_id": self.items[0]["item_id"], "kind": "FILE", "category": "DOCUMENT", **fresh},
+            {"item_id": self.items[1]["item_id"], "kind": "PROFILE", "category": None, **fresh},
+        ]
+        self.assertEqual(self._listed("incoming"), expected)
+        self._as("budi")
+        self.assertEqual(self._listed("outgoing"), expected)
+        self.assertNotIn("lab-result", str(self._listed("outgoing")))
+
+    def test_redeemed_flag_and_access_count_update(self):
+        self._as("budi")
+        item = self.items[0]
+        base = f"/api/access-requests/{self.request_id}/items/{item['item_id']}/"
+        self.client.post(base + "redeem/", {"envelope": item["envelope"]}, format="json")
+        self.client.get(base)
+        listed = self._listed("outgoing")[0]
+        self.assertEqual((listed["redeemed"], listed["access_count"]), (True, 1))
+
+    def test_revoked_request_lists_no_items(self):
+        self.client.delete(f"/api/access-requests/{self.request_id}/")
+        self.assertEqual(self._listed("incoming"), [])

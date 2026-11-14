@@ -149,9 +149,10 @@ class AccessRequestCreateListApiTests(AuthenticatedApiTestCase):
         listed = self.client.get(self.URL).json()
         expected = {
             "id", "requester", "owner", "message", "category", "status",
-            "created_at", "decided_at", "expires_at", "expired",
+            "created_at", "decided_at", "expires_at", "expired", "items",
         }
         for body in [created, *listed]:
+            self.assertEqual(body["items"], [])
             self.assertEqual(set(body), expected)
             self.assertNotIn("lab-result", str(body))
 

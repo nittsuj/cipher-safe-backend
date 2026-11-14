@@ -312,7 +312,7 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/shares/received/` | Doctor: unexpired records shared with me (name stays encrypted) |
 | GET | `/api/shares/received/{id}/open/?inline=1` | Doctor: decrypt with the `X-Share-Key` header |
 | POST | `/api/access-requests/` | Ask a user for their data (`owner`, optional `message`, `category`: a record category or `PROFILE`); any role to any role; one pending request per pair |
-| GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first |
+| GET | `/api/access-requests/?box=incoming` | Requests to me (`incoming`, default) or from me (`outgoing`), newest first; approved ones list their `items` (id, kind, category, redeemed, access count; never names or content) |
 | POST | `/api/access-requests/{id}/deny/` | Owner refuses a pending request |
 | DELETE | `/api/access-requests/{id}/` | Requester cancels a pending request (`CANCELLED`); owner revokes an approved one (`REVOKED`, every granted copy and key deleted); 404 if you're not part of the request, 409 if the status doesn't allow it |
 | POST | `/api/access-requests/{id}/approve/` | Owner grants a pending request (`file_ids`, `include_profile`, `expires_hours` 1-168); needs the password; returns one envelope per item (the item key encrypted with the requester's RSA public key) and the requester's key fingerprint; 409 if the requester has no encryption key yet |
