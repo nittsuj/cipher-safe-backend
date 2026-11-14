@@ -543,7 +543,7 @@ class ReceivedShareOpenView(APIView):
             label.get("name") or f"shared-record-{share.pk}",
             inline=_wants_inline(request),
         )
-        response["X-Content-Type"] = content_type
+        response["X-Content-Type"] = label.get("content_type", "")
         return response
 
 
