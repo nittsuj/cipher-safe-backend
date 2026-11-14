@@ -12,6 +12,8 @@ urlpatterns = [
     # Account
     path("me/", views.MeView.as_view(), name="me"),
     path("me/personal-data/", views.PersonalDataView.as_view(), name="personal-data"),
+    path("me/keys/", views.MyKeyPairsView.as_view(), name="my-keys"),
+    path("users/<str:username>/public-key/", views.UserPublicKeyView.as_view(), name="user-public-key"),
     # Files
     path("files/", views.FileListCreateView.as_view(), name="file-list"),
     path("files/<int:pk>/", views.FileDetailView.as_view(), name="file-detail"),

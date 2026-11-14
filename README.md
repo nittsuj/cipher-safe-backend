@@ -179,6 +179,25 @@ file name and bytes together, so the doctor sees only who shared what kind of
 record until they enter the key. Shares expire (1 hour to 1 week), can be
 revoked, count how often they were opened, and the open endpoint is throttled.
 
+## User key pairs
+
+Every account (patient or doctor) can have **RSA key pairs**, one active pair
+per purpose: `ENCRYPTION` (the public key encrypts keys of records shared with
+the user) and `SIGNING` (the private key signs the user's PDFs). A pair is
+generated on first use and can be rotated; the old pair stays, inactive.
+
+| Item | Value |
+| --- | --- |
+| Algorithm | RSA-3072, public exponent 65537 (`cryptography`) |
+| Fingerprint | SHA-256 of the DER public key, shown as `AB:CD:...` |
+| Private key at rest | PKCS#8, encrypted with **AES-256-GCM**; never stored in the clear |
+| Key-encryption key | PBKDF2-HMAC-SHA256 of the user's password, 600,000 rounds, random 16-byte salt per pair |
+| Associated data | `cipher-safe/keypair:<user id>:<purpose>`, so a stored key can't be moved to another user or purpose |
+| In use | Decrypted in memory, for one request, with the password the client sends |
+
+Changing the password would need every private key re-wrapped; there is no
+password change, so this is a known limitation.
+
 ## Setup
 
 ### 1. Create `.env` and generate its secrets
@@ -271,6 +290,9 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | POST | `/api/auth/refresh/` | Exchange a refresh token for a new pair |
 | POST | `/api/auth/logout/` | Blacklist the supplied refresh token |
 | GET | `/api/me/` | Current user |
+| GET | `/api/me/keys/` | My active key pairs: purpose, algorithm, fingerprint, public key (never the private key) |
+| POST | `/api/me/keys/` | Generate a pair (`purpose`: `ENCRYPTION` or `SIGNING`; `rotate`: replace the active one); needs the password; 201 new, 200 existing |
+| GET | `/api/users/{username}/public-key/?purpose=ENCRYPTION` | Another user's active public key and fingerprint; 404 if they have none |
 | GET | `/api/me/personal-data/?algorithm=AES` | Decrypt the patient profile |
 | PUT | `/api/me/personal-data/` | Replace the patient profile (encrypted with AES/DES/RC4) |
 | GET | `/api/files/?category=VIDEO` | List files (metadata only) |

@@ -9,8 +9,8 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 
-from .constants import FILE_CATEGORY_CHOICES, ROLE_DOCTOR
-from .models import DownloadEvent, FileCiphertext, FileShare, StoredFile
+from .constants import FILE_CATEGORY_CHOICES, KEY_PURPOSE_CHOICES, ROLE_DOCTOR
+from .models import DownloadEvent, FileCiphertext, FileShare, StoredFile, UserKeyPair
 
 User = get_user_model()
 
@@ -228,7 +228,44 @@ class ReceivedShareSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class KeyPairSerializer(serializers.ModelSerializer):
+    """One of the user's own key pairs: public parts only.
+
+    The field list is an allowlist; the encrypted private key, its salt and
+    nonce never leave the server.
+    """
+
+    has_certificate = serializers.SerializerMethodField()
+
+    def get_has_certificate(self, obj) -> bool:
+        return bool(obj.certificate_pem)
+
+    class Meta:
+        model = UserKeyPair
+        fields = ["purpose", "algorithm", "fingerprint", "public_key_pem", "has_certificate", "created_at"]
+        read_only_fields = fields
+
+
+class KeyPairCreateSerializer(serializers.Serializer):
+    purpose = serializers.ChoiceField(choices=KEY_PURPOSE_CHOICES)
+    rotate = serializers.BooleanField(default=False)
+
+
+class PublicKeySerializer(serializers.ModelSerializer):
+    """Another user's active public key, for encrypting data to them."""
+
+    username = serializers.CharField(source="user.username", read_only=True)
+
+    class Meta:
+        model = UserKeyPair
+        fields = ["username", "purpose", "algorithm", "fingerprint", "public_key_pem"]
+        read_only_fields = fields
+
+
 __all__ = [
+    "KeyPairCreateSerializer",
+    "KeyPairSerializer",
+    "PublicKeySerializer",
     "PII_FIELDS",
     "FileShareSerializer",
     "ReceivedShareSerializer",

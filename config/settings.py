@@ -136,6 +136,7 @@ REST_FRAMEWORK = {
         'auth': env('THROTTLE_AUTH', default='10/min'),
         'benchmark': env('THROTTLE_BENCHMARK', default='10/min'),
         'share': env('THROTTLE_SHARE', default='20/min'),
+        'keygen': env('THROTTLE_KEYGEN', default='10/min'),
     },
 }
 

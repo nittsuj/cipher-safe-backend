@@ -17,9 +17,16 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .constants import PREVIEWABLE_TYPES, ROLE_DOCTOR, ROLE_PATIENT, SUPPORTED_ALGORITHMS
+from .constants import (
+    KEY_PURPOSE_CHOICES,
+    KEY_PURPOSE_ENCRYPTION,
+    PREVIEWABLE_TYPES,
+    ROLE_DOCTOR,
+    ROLE_PATIENT,
+    SUPPORTED_ALGORITHMS,
+)
 from .crypto import IntegrityError
-from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile
+from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile, User, UserKeyPair
 from .serializers import (
     PII_FIELDS,
     DownloadEventSerializer,
@@ -27,8 +34,11 @@ from .serializers import (
     ReceivedShareSerializer,
     ShareCreateSerializer,
     FileUploadSerializer,
+    KeyPairCreateSerializer,
+    KeyPairSerializer,
     LoginSerializer,
     PersonalDataSerializer,
+    PublicKeySerializer,
     RegisterSerializer,
     StoredFileSerializer,
     UserSerializer,
@@ -37,11 +47,13 @@ from .services import (
     create_share,
     decrypt_file,
     delete_share,
+    ensure_key_pair,
     open_share,
     decrypt_file_label,
     decrypt_file_labels,
     decrypt_personal_data,
     log_download,
+    rotate_key_pair,
     benchmark_decryption,
     store_personal_data,
     store_record,
@@ -508,3 +520,53 @@ class ReceivedShareOpenView(APIView):
         )
         response["X-Content-Type"] = label.get("content_type", "")
         return response
+
+
+class MyKeyPairsView(APIView):
+    """List the signed-in user's active key pairs, or generate / rotate one.
+
+    Any account (patient or doctor) has key pairs. Generating needs the
+    password, because the new private key is encrypted with it. Throttled:
+    RSA-3072 generation is expensive.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "keygen"
+
+    def get_throttles(self):
+        # Listing is cheap; only generation is rate-limited.
+        return super().get_throttles() if self.request.method == "POST" else []
+
+    def get(self, request):
+        pairs = UserKeyPair.objects.filter(user=request.user, active=True).order_by("purpose")
+        return Response(KeyPairSerializer(pairs, many=True).data)
+
+    def post(self, request):
+        password = require_password(request)
+        serializer = KeyPairCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        purpose = serializer.validated_data["purpose"]
+        if serializer.validated_data["rotate"]:
+            pair, created = rotate_key_pair(request.user, purpose, password), True
+        else:
+            pair, created = ensure_key_pair(request.user, purpose, password)
+        return Response(
+            KeyPairSerializer(pair).data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class UserPublicKeyView(APIView):
+    """Another user's active public key and fingerprint (``?purpose=``, default
+    ``ENCRYPTION``). Never generates a key for someone else: 404 if they have none."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, username: str):
+        purpose = (request.query_params.get("purpose") or KEY_PURPOSE_ENCRYPTION).upper()
+        if purpose not in dict(KEY_PURPOSE_CHOICES):
+            raise ValidationError({"purpose": f"Must be one of {', '.join(dict(KEY_PURPOSE_CHOICES))}."})
+        owner = get_object_or_404(User, username=username)
+        pair = get_object_or_404(UserKeyPair, user=owner, purpose=purpose, active=True)
+        return Response(PublicKeySerializer(pair).data)
