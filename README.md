@@ -319,9 +319,10 @@ Access tokens are short-lived (15 minutes); exchange the refresh token at
 | GET | `/api/me/personal-data/?algorithm=AES` | Decrypt the patient profile |
 | PUT | `/api/me/personal-data/` | Replace the patient profile (encrypted with AES/DES/RC4) |
 | GET | `/api/files/?category=VIDEO` | List files (metadata only) |
-| POST | `/api/files/` | Upload (`file`, `category`); encrypts with all algorithms |
+| POST | `/api/files/` | Upload (`file`, `category`, optional `sign=true`); encrypts with all algorithms. With `sign=true` a PDF is first signed with the uploader's signing key (created on first use), then the signed file is encrypted; 400 if it isn't a PDF, 409 if already signed |
 | GET | `/api/files/{id}/` | File metadata + per-algorithm ciphertext info |
 | DELETE | `/api/files/{id}/` | Delete a file |
+| POST | `/api/files/{id}/sign/` | Sign a stored PDF with my signing key (created on first use); all three encrypted copies are replaced by encryptions of the signed file; needs the password; 400 not a PDF, 409 already signed |
 | GET | `/api/files/{id}/download/?algorithm=DES&inline=1` | Decrypt and download; `inline=1` serves safe types (PDF, images, video, text) for in-browser preview |
 | GET | `/api/files/{id}/ciphertext/?algorithm=DES` | Download the stored copy as-is (ciphertext), keeping the original extension (`lab.DES-encrypted.pdf`); needs the password |
 | GET | `/api/files/{id}/benchmark/?algorithm=AES&runs=10` | N timed decryptions (total and cipher-only samples) |

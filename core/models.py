@@ -419,3 +419,23 @@ class SharedKey(models.Model):
 
     def __str__(self) -> str:
         return f"Key for grant {self.item_id}"
+
+
+class PdfSignature(models.Model):
+    """A Cipher Safe signature embedded in a stored PDF.
+
+    The signature itself lives inside the PDF (and so inside every encrypted
+    copy); this row records who signed with which key, for the record list and
+    for checking later that the signer is the owner.
+    """
+
+    file = models.OneToOneField(StoredFile, on_delete=models.CASCADE, related_name="signature")
+    #: The signing pair used; kept even after rotation, like encryption pairs.
+    key_pair = models.ForeignKey(UserKeyPair, on_delete=models.PROTECT, related_name="signatures")
+    #: The certificate's SHA-256 at signing time.
+    signer_fingerprint = models.CharField(max_length=95)
+    signed_at = models.DateTimeField(auto_now_add=True)
+    sign_ms = models.FloatField(default=0.0)
+
+    def __str__(self) -> str:
+        return f"Signature on record {self.file_id}"

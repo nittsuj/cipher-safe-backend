@@ -149,6 +149,19 @@ class StoredFileSerializer(serializers.ModelSerializer):
     def get_content_type(self, obj) -> str:
         return self._label(obj).get("content_type", "")
 
+    signed = serializers.SerializerMethodField()
+    signed_at = serializers.SerializerMethodField()
+
+    def _signature(self, obj):
+        return getattr(obj, "signature", None)
+
+    def get_signed(self, obj) -> bool:
+        return self._signature(obj) is not None
+
+    def get_signed_at(self, obj):
+        signature = self._signature(obj)
+        return serializers.DateTimeField().to_representation(signature.signed_at) if signature else None
+
     class Meta:
         model = StoredFile
         fields = [
@@ -159,6 +172,8 @@ class StoredFileSerializer(serializers.ModelSerializer):
             "plaintext_size",
             "created_at",
             "ciphertexts",
+            "signed",
+            "signed_at",
         ]
         read_only_fields = fields
 
@@ -166,6 +181,8 @@ class StoredFileSerializer(serializers.ModelSerializer):
 class FileUploadSerializer(serializers.Serializer):
     file = serializers.FileField()
     category = serializers.ChoiceField(choices=FILE_CATEGORY_CHOICES)
+    #: Sign the PDF with the uploader's signing key before it is encrypted.
+    sign = serializers.BooleanField(default=False)
 
     def validate_file(self, value):
         if value.size > settings.MAX_UPLOAD_BYTES:

@@ -64,6 +64,14 @@ class NotRedeemed(APIException):
     default_code = "not_redeemed"
 
 
+class Conflict(APIException):
+    """The request can't be done in the current state (e.g. already signed)."""
+
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "This can't be done in the current state."
+    default_code = "conflict"
+
+
 def exception_handler(exc, context):
     """DRF's handler, plus :class:`IntegrityError` -> HTTP 409."""
 

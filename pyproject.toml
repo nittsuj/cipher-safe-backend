@@ -16,6 +16,7 @@ dependencies = [
     "djangorestframework-simplejwt>=5.5.1",
     "psycopg2-binary>=2.9.13",
     "pycryptodome>=4.0.0",
+    "pyhanko>=0.38.1",
 ]
 
 # This is a Django application, not an importable library: there is no package

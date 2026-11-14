@@ -30,6 +30,8 @@ from .constants import (
     ROLE_PATIENT,
     SUPPORTED_ALGORITHMS,
 )
+from .exceptions import Conflict
+from .signing import AlreadySigned, PdfSigningError
 from .crypto import IntegrityError, certificate_der, load_certificate
 from .models import (
     AccessRequest,
@@ -69,6 +71,8 @@ from .services import (
     open_item,
     redeem_item,
     revoke_request,
+    sign_pdf_for,
+    sign_stored_pdf,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -275,7 +279,11 @@ class FileListCreateView(APIView):
 
     def get(self, request):
         password = require_password(request)
-        files = StoredFile.objects.filter(owner=request.user).prefetch_related("ciphertexts", "labels")
+        files = (
+            StoredFile.objects.filter(owner=request.user)
+            .select_related("signature")
+            .prefetch_related("ciphertexts", "labels")
+        )
         category = request.query_params.get("category")
         if category:
             files = files.filter(category=category.upper())
@@ -294,6 +302,12 @@ class FileListCreateView(APIView):
             raise ValidationError({"file": "The uploaded file is empty."})
 
         label = {"name": upload.name, "content_type": getattr(upload, "content_type", "") or ""}
+        signature = None
+        if serializer.validated_data["sign"]:
+            # Sign first, then encrypt the signed bytes (the signature survives
+            # decryption, download and sharing).
+            signature = sign_or_error(request.user, data, label["content_type"], password)
+            data = signature.data
         stored_file = store_record(
             request.user,
             serializer.validated_data["category"],
@@ -301,12 +315,25 @@ class FileListCreateView(APIView):
             label["content_type"],
             data,
             password,
+            signature=signature,
         )
         stored_file.refresh_from_db()
         return Response(
             StoredFileSerializer(stored_file, context={"labels": {stored_file.pk: label}}).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+def sign_or_error(user, data: bytes, content_type: str, password: str):
+    """Sign a PDF, turning signing problems into API errors: 400 for a file
+    that can't be signed, 409 for one already signed."""
+
+    try:
+        return sign_pdf_for(user, data, content_type, password)
+    except AlreadySigned as exc:
+        raise Conflict(str(exc))
+    except PdfSigningError as exc:
+        raise ValidationError({"file": str(exc)})
 
 
 class FileDetailView(APIView):
@@ -322,10 +349,29 @@ class FileDetailView(APIView):
         return Response(StoredFileSerializer(stored_file, context={"labels": labels}).data)
 
     def delete(self, request, pk: int):
-        # The ciphertext and share blobs are removed from disk by the
+        # The ciphertext and granted-copy blobs are removed from disk by the
         # post_delete handlers in core.signals.
         self._get_file(request, pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FileSignView(APIView):
+    """Sign a stored PDF with the owner's signing key (created on first use).
+    All three encrypted copies are replaced by encryptions of the signed file."""
+
+    permission_classes = PATIENT_ONLY
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        try:
+            signed_file = sign_stored_pdf(stored_file, password)
+        except AlreadySigned as exc:
+            raise Conflict(str(exc))
+        except PdfSigningError as exc:
+            raise ValidationError({"file": str(exc)})
+        labels = {signed_file.pk: decrypt_file_label(signed_file, password)}
+        return Response(StoredFileSerializer(signed_file, context={"labels": labels}).data)
 
 
 class FileDownloadView(APIView):

@@ -4,6 +4,7 @@ from django.contrib.auth.admin import UserAdmin
 from .models import (
     AccessRequest,
     GrantedItem,
+    PdfSignature,
     DownloadEvent,
     EncryptedValue,
     FileCiphertext,
@@ -75,6 +76,11 @@ class AccessRequestAdmin(admin.ModelAdmin):
 class GrantedItemAdmin(admin.ModelAdmin):
     list_display = ("id", "request", "kind", "file", "plaintext_size", "access_count", "created_at")
     list_filter = ("kind",)
+
+
+@admin.register(PdfSignature)
+class PdfSignatureAdmin(admin.ModelAdmin):
+    list_display = ("id", "file", "key_pair", "signer_fingerprint", "signed_at", "sign_ms")
 
 
 admin.site.register(PersonalData)
