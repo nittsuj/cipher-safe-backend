@@ -137,6 +137,7 @@ REST_FRAMEWORK = {
         'benchmark': env('THROTTLE_BENCHMARK', default='10/min'),
         'share': env('THROTTLE_SHARE', default='20/min'),
         'keygen': env('THROTTLE_KEYGEN', default='10/min'),
+        'request': env('THROTTLE_REQUEST', default='10/min'),
     },
 }
 

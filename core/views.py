@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from django.contrib.auth import authenticate
+from django.db import IntegrityError as DatabaseIntegrityError
 from django.db import transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
@@ -26,8 +27,19 @@ from .constants import (
     SUPPORTED_ALGORITHMS,
 )
 from .crypto import IntegrityError
-from .models import DownloadEvent, FileCiphertext, FileShare, PersonalData, StoredFile, User, UserKeyPair
+from .models import (
+    AccessRequest,
+    DownloadEvent,
+    FileCiphertext,
+    FileShare,
+    PersonalData,
+    StoredFile,
+    User,
+    UserKeyPair,
+)
 from .serializers import (
+    AccessRequestCreateSerializer,
+    AccessRequestSerializer,
     PII_FIELDS,
     DownloadEventSerializer,
     FileShareSerializer,
@@ -570,3 +582,41 @@ class UserPublicKeyView(APIView):
         owner = get_object_or_404(User, username=username)
         pair = get_object_or_404(UserKeyPair, user=owner, purpose=purpose, active=True)
         return Response(PublicKeySerializer(pair).data)
+
+
+class AccessRequestListCreateView(APIView):
+    """Ask another user for their data, or list my requests.
+
+    ``?box=incoming`` (default): requests to me. ``?box=outgoing``: requests I
+    sent. Any role can ask any other user. No password: nothing is decrypted.
+    Creating is throttled so a user can't flood someone's inbox.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "request"
+
+    def get_throttles(self):
+        return super().get_throttles() if self.request.method == "POST" else []
+
+    def get(self, request):
+        box = (request.query_params.get("box") or "incoming").lower()
+        if box == "incoming":
+            requests = AccessRequest.objects.filter(owner=request.user)
+        elif box == "outgoing":
+            requests = AccessRequest.objects.filter(requester=request.user)
+        else:
+            raise ValidationError({"box": "Must be incoming or outgoing."})
+        requests = requests.select_related("requester", "owner")
+        return Response(AccessRequestSerializer(requests, many=True).data)
+
+    def post(self, request):
+        serializer = AccessRequestCreateSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        try:
+            with transaction.atomic():
+                access_request = serializer.save()
+        except DatabaseIntegrityError:
+            # Two requests raced past the pending check; the constraint caught it.
+            raise ValidationError({"owner": "You already have a pending request to this user."})
+        return Response(AccessRequestSerializer(access_request).data, status=status.HTTP_201_CREATED)

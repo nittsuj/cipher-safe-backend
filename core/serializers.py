@@ -9,8 +9,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model, password_validation
 from rest_framework import serializers
 
-from .constants import FILE_CATEGORY_CHOICES, KEY_PURPOSE_CHOICES, ROLE_DOCTOR
-from .models import DownloadEvent, FileCiphertext, FileShare, StoredFile, UserKeyPair
+from .constants import (
+    FILE_CATEGORY_CHOICES,
+    KEY_PURPOSE_CHOICES,
+    REQUEST_CATEGORY_CHOICES,
+    REQUEST_PENDING,
+    ROLE_DOCTOR,
+)
+from .models import AccessRequest, DownloadEvent, FileCiphertext, FileShare, StoredFile, UserKeyPair
 
 User = get_user_model()
 
@@ -262,7 +268,58 @@ class PublicKeySerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class AccessRequestSerializer(serializers.ModelSerializer):
+    """A request as both sides see it. Says nothing about the owner's records."""
+
+    requester = serializers.CharField(source="requester.username", read_only=True)
+    owner = serializers.CharField(source="owner.username", read_only=True)
+    expired = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = AccessRequest
+        fields = [
+            "id",
+            "requester",
+            "owner",
+            "message",
+            "category",
+            "status",
+            "created_at",
+            "decided_at",
+            "expires_at",
+            "expired",
+        ]
+        read_only_fields = fields
+
+
+class AccessRequestCreateSerializer(serializers.Serializer):
+    owner = serializers.CharField(help_text="Username of the user whose data you ask for.")
+    message = serializers.CharField(max_length=500, required=False, allow_blank=True, default="")
+    category = serializers.ChoiceField(
+        choices=REQUEST_CATEGORY_CHOICES, required=False, allow_blank=True, default=""
+    )
+
+    def validate_owner(self, value):
+        owner = User.objects.filter(username=value).first()
+        if owner is None:
+            raise serializers.ValidationError("No user with that username.")
+        if owner == self.context["request"].user:
+            raise serializers.ValidationError("You can't request your own data.")
+        return owner
+
+    def validate(self, attrs):
+        requester = self.context["request"].user
+        if AccessRequest.objects.filter(requester=requester, owner=attrs["owner"], status=REQUEST_PENDING).exists():
+            raise serializers.ValidationError({"owner": "You already have a pending request to this user."})
+        return attrs
+
+    def create(self, validated_data):
+        return AccessRequest.objects.create(requester=self.context["request"].user, **validated_data)
+
+
 __all__ = [
+    "AccessRequestCreateSerializer",
+    "AccessRequestSerializer",
     "KeyPairCreateSerializer",
     "KeyPairSerializer",
     "PublicKeySerializer",

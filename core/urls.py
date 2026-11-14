@@ -27,6 +27,7 @@ urlpatterns = [
     path("shares/received/", views.ReceivedShareListView.as_view(), name="shares-received"),
     path("shares/received/<int:pk>/open/", views.ReceivedShareOpenView.as_view(), name="share-open"),
     # Analysis
+    path("access-requests/", views.AccessRequestListCreateView.as_view(), name="access-requests"),
     path("analysis/downloads/", views.DownloadHistoryView.as_view(), name="download-history"),
     path("analysis/timings/", views.TimingAnalysisView.as_view(), name="timing-analysis"),
 ]
