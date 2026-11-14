@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from pathlib import Path
 
@@ -135,8 +136,8 @@ class PdfSignatureRecordTests(AuthenticatedApiTestCase):
         self.assertFalse(PdfSignature.objects.exists())
 
 
-class SignOnUploadTests(AuthenticatedApiTestCase):
-    """POST /api/files/ with ``sign=true``."""
+class PdfUploadHelpers(AuthenticatedApiTestCase):
+    """Upload and download helpers for the signing API tests (no tests here)."""
 
     def _upload_pdf(self, data=SAMPLE, sign=True, content_type="application/pdf", name="lab.pdf"):
         upload = SimpleUploadedFile(name, data, content_type=content_type)
@@ -149,6 +150,10 @@ class SignOnUploadTests(AuthenticatedApiTestCase):
         response = self.client.get(f"/api/files/{file_id}/download/", {"algorithm": algorithm})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         return response.content
+
+
+class SignOnUploadTests(PdfUploadHelpers):
+    """POST /api/files/ with ``sign=true``."""
 
     def test_signed_upload_stores_the_signed_pdf_in_every_copy(self):
         response = self._upload_pdf()
@@ -203,3 +208,54 @@ class SignOnUploadTests(AuthenticatedApiTestCase):
         self.assertEqual(self._upload_pdf().status_code, status.HTTP_403_FORBIDDEN)
         self.assertFalse(UserKeyPair.objects.filter(purpose=KEY_PURPOSE_SIGNING).exists())
         self.assertFalse(StoredFile.objects.exists())
+
+
+class SignStoredPdfTests(PdfUploadHelpers):
+    """POST /api/files/{id}/sign/ for a PDF stored without a signature."""
+
+    def _sign(self, file_id):
+        return self.client.post(f"/api/files/{file_id}/sign/")
+
+    def test_sign_existing_reencrypts_all_three_copies(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        old_paths = [c.blob.path for c in StoredFile.objects.get(pk=file_id).ciphertexts.all()]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self._sign(file_id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(response.json()["signed"])
+        self.assertEqual(response.json()["original_name"], "lab.pdf")
+
+        copies = {algorithm: self._download(file_id, algorithm) for algorithm in ("AES", "DES", "RC4")}
+        self.assertEqual(len(set(copies.values())), 1)
+        signed = copies["AES"]
+        self.assertTrue(signed.startswith(SAMPLE) and len(signed) > len(SAMPLE))
+        self.assertEqual(len(PdfFileReader(BytesIO(signed)).embedded_signatures), 1)
+        self.assertEqual(StoredFile.objects.get(pk=file_id).plaintext_size, len(signed))
+        self.assertFalse(any(os.path.exists(path) for path in old_paths))  # old copies removed
+
+    def test_sign_twice_409(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        self._sign(file_id)
+        self.assertEqual(self._sign(file_id).status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(PdfSignature.objects.count(), 1)
+
+    def test_sign_non_pdf_record_400(self):
+        file_id = self._upload()["id"]  # the base helper uploads fake bytes labelled as a PDF
+        response = self._sign(file_id)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(PdfSignature.objects.exists())
+
+    def test_wrong_password_changes_nothing(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        self._auth(password="not-the-password")
+        self.assertEqual(self._sign(file_id).status_code, status.HTTP_403_FORBIDDEN)
+        self._auth()
+        self.assertEqual(self._download(file_id, "AES"), SAMPLE)
+
+    def test_someone_elses_record_is_404(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        User.objects.create_user("citra", password=PASSWORD)
+        login = self.client.post("/api/auth/login/", {"username": "citra", "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+        self.assertEqual(self._sign(file_id).status_code, status.HTTP_404_NOT_FOUND)

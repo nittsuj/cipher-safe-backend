@@ -72,6 +72,7 @@ from .services import (
     redeem_item,
     revoke_request,
     sign_pdf_for,
+    sign_stored_pdf,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -348,10 +349,29 @@ class FileDetailView(APIView):
         return Response(StoredFileSerializer(stored_file, context={"labels": labels}).data)
 
     def delete(self, request, pk: int):
-        # The ciphertext and share blobs are removed from disk by the
+        # The ciphertext and granted-copy blobs are removed from disk by the
         # post_delete handlers in core.signals.
         self._get_file(request, pk).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class FileSignView(APIView):
+    """Sign a stored PDF with the owner's signing key (created on first use).
+    All three encrypted copies are replaced by encryptions of the signed file."""
+
+    permission_classes = PATIENT_ONLY
+
+    def post(self, request, pk: int):
+        password = require_password(request)
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        try:
+            signed_file = sign_stored_pdf(stored_file, password)
+        except AlreadySigned as exc:
+            raise Conflict(str(exc))
+        except PdfSigningError as exc:
+            raise ValidationError({"file": str(exc)})
+        labels = {signed_file.pk: decrypt_file_label(signed_file, password)}
+        return Response(StoredFileSerializer(signed_file, context={"labels": labels}).data)
 
 
 class FileDownloadView(APIView):

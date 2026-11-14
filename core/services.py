@@ -39,7 +39,7 @@ from .constants import (
     REQUEST_REVOKED,
     SUPPORTED_ALGORITHMS,
 )
-from .signing import NotAPdf, is_pdf, sign_pdf
+from .signing import AlreadySigned, NotAPdf, is_pdf, sign_pdf
 from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
@@ -686,3 +686,36 @@ def sign_pdf_for(user, data: bytes, content_type: str, password: str) -> SignedP
     signed, sign_ms = sign_pdf(data, private_key, load_certificate(pair.certificate_pem), user.username)
     key_log.info("sign user=%s pdf_bytes=%d sign_ms=%.3f", user.pk, len(data), sign_ms)
     return SignedPdf(signed, pair, sign_ms)
+
+
+def sign_stored_pdf(stored_file: StoredFile, password: str) -> StoredFile:
+    """Sign a PDF that is already stored, and replace all its encrypted copies.
+
+    Decrypts the AES copy, signs it with the owner's signing key, then
+    re-encrypts the **signed** file with AES, DES and RC4. Old and new copies are
+    swapped in one transaction (the old files go after commit), so a failure
+    leaves the record as it was. Copies already shared through access requests
+    are separate snapshots and stay as they were.
+    """
+
+    if hasattr(stored_file, "signature"):
+        raise AlreadySigned("This PDF is already signed in Cipher Safe.")
+    label = decrypt_file_label(stored_file, password)
+    data = decrypt_file(stored_file.ciphertexts.get(algorithm="AES"), password).plaintext
+    signed = sign_pdf_for(stored_file.owner, data, label.get("content_type", ""), password)
+    with transaction.atomic():
+        locked = StoredFile.objects.select_for_update().get(pk=stored_file.pk)
+        if PdfSignature.objects.filter(file=locked).exists():
+            raise AlreadySigned("This PDF is already signed in Cipher Safe.")
+        for old in locked.ciphertexts.all():
+            old.delete()  # its file is removed by the post_delete handler after commit
+        store_file_ciphertexts(locked, signed.data, password)
+        locked.plaintext_size = len(signed.data)
+        locked.save(update_fields=["plaintext_size"])
+        PdfSignature.objects.create(
+            file=locked,
+            key_pair=signed.key_pair,
+            signer_fingerprint=signed.key_pair.fingerprint,
+            sign_ms=signed.sign_ms,
+        )
+    return StoredFile.objects.select_related("signature").get(pk=stored_file.pk)
