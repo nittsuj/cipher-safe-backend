@@ -15,16 +15,35 @@ import base64
 import json
 import secrets
 import struct
+import time
 from datetime import timedelta
 
 from django.core.files.base import ContentFile
+from django.db import IntegrityError as DatabaseIntegrityError
 from django.db import transaction
 from django.db.models import Avg, Count, F, Max, Min
 from django.utils import timezone
 
 from .constants import MODE_FOR, SUPPORTED_ALGORITHMS
-from .crypto import encrypt
-from .models import DownloadEvent, EncryptedValue, FileCiphertext, FileLabel, FileShare, PersonalData, StoredFile
+from .crypto import (
+    encrypt,
+    fingerprint,
+    generate_rsa_key_pair,
+    key_pair_aad,
+    public_key_pem,
+    unwrap_private_key,
+    wrap_private_key,
+)
+from .models import (
+    DownloadEvent,
+    EncryptedValue,
+    FileCiphertext,
+    FileLabel,
+    FileShare,
+    PersonalData,
+    StoredFile,
+    UserKeyPair,
+)
 
 #: ``EncryptedValue.field_name`` of the single encrypted patient-profile record.
 PROFILE_RECORD = "profile"
@@ -295,3 +314,74 @@ def timing_summary(owner) -> dict:
         "downloads": list(downloads),
         "encryptions": list(encryptions),
     }
+
+
+# ---------------------------------------------------------------- key pairs
+
+
+def active_key_pair(user, purpose: str) -> UserKeyPair | None:
+    """The user's active key pair for ``purpose``, or ``None``."""
+
+    return UserKeyPair.objects.filter(user=user, purpose=purpose, active=True).first()
+
+
+def _create_key_pair(user, purpose: str, password: str) -> UserKeyPair:
+    """Generate a pair and store it with the private key wrapped by ``password``.
+
+    The private key exists unencrypted only inside this call.
+    """
+
+    started = time.perf_counter()
+    private_key = generate_rsa_key_pair()
+    generation_ms = (time.perf_counter() - started) * 1000
+    public_key = private_key.public_key()
+    wrapped = wrap_private_key(private_key, password, key_pair_aad(user.pk, purpose))
+    return UserKeyPair.objects.create(
+        user=user,
+        purpose=purpose,
+        public_key_pem=public_key_pem(public_key),
+        encrypted_private_key=wrapped.ciphertext,
+        kek_salt=wrapped.salt,
+        nonce=wrapped.nonce,
+        fingerprint=fingerprint(public_key),
+        generation_ms=round(generation_ms, 3),
+    )
+
+
+def ensure_key_pair(user, purpose: str, password: str) -> tuple[UserKeyPair, bool]:
+    """Return the user's active pair for ``purpose``, generating one if needed.
+
+    Returns ``(pair, created)``. Two requests racing to create the first pair
+    hit the one-active-pair constraint; the loser returns the winner's pair.
+    """
+
+    existing = active_key_pair(user, purpose)
+    if existing is not None:
+        return existing, False
+    try:
+        with transaction.atomic():
+            return _create_key_pair(user, purpose, password), True
+    except DatabaseIntegrityError:
+        return UserKeyPair.objects.get(user=user, purpose=purpose, active=True), False
+
+
+def rotate_key_pair(user, purpose: str, password: str) -> UserKeyPair:
+    """Replace the active pair with a new one; the old pair stays, inactive.
+
+    Data already encrypted for the old public key can still be opened with the
+    old private key, so old pairs are never deleted here.
+    """
+
+    with transaction.atomic():
+        UserKeyPair.objects.select_for_update().filter(user=user, purpose=purpose, active=True).update(active=False)
+        return _create_key_pair(user, purpose, password)
+
+
+def load_private_key(pair: UserKeyPair, password: str):
+    """Decrypt a pair's private key in memory, for use within one request.
+
+    Raises :class:`core.crypto.IntegrityError` for a wrong password or a
+    modified key (HTTP 409 through the exception handler).
+    """
+
+    return unwrap_private_key(pair.wrapped, password, key_pair_aad(pair.user_id, pair.purpose))
