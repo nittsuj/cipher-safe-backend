@@ -4,13 +4,19 @@ from io import BytesIO
 from pathlib import Path
 
 from asn1crypto import x509 as asn1_x509
+from django.db import IntegrityError as DatabaseIntegrityError
+from django.db.models import ProtectedError
 from django.test import SimpleTestCase
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign.validation import validate_pdf_signature
 from pyhanko_certvalidator import ValidationContext
 
+from ..constants import KEY_PURPOSE_SIGNING
 from ..crypto import build_signing_certificate, certificate_der, generate_rsa_key_pair
+from ..models import PdfSignature, User
+from ..services import ensure_key_pair
 from ..signing import SIGNATURE_FIELD, AlreadySigned, EncryptedPdf, NotAPdf, is_pdf, sign_pdf
+from .base import PASSWORD, AuthenticatedApiTestCase
 
 SAMPLE = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
 
@@ -83,3 +89,45 @@ class SignPdfTests(SimpleTestCase):
         writer.write(buffer)
         with self.assertRaises(EncryptedPdf):
             sign_pdf(buffer.getvalue(), self.key, self.certificate, "alice")
+
+
+class PdfSignatureRecordTests(AuthenticatedApiTestCase):
+    """The ``PdfSignature`` row and the ``signed`` / ``signed_at`` record fields."""
+
+    def setUp(self):
+        super().setUp()
+        self.file_id = self._upload()["id"]
+        self.alice = User.objects.get(username="alice")
+        self.pair, _ = ensure_key_pair(self.alice, KEY_PURPOSE_SIGNING, PASSWORD)
+
+    def _record(self):
+        [record] = self.client.get("/api/files/").json()
+        return record
+
+    def test_unsigned_record_says_so(self):
+        record = self._record()
+        self.assertEqual((record["signed"], record["signed_at"]), (False, None))
+
+    def test_signed_record_lists_when_it_was_signed(self):
+        PdfSignature.objects.create(
+            file_id=self.file_id, key_pair=self.pair, signer_fingerprint=self.pair.fingerprint, sign_ms=12.5
+        )
+        record = self._record()
+        self.assertTrue(record["signed"])
+        self.assertIsNotNone(record["signed_at"])
+        self.assertEqual(self.client.get(f"/api/files/{self.file_id}/").json()["signed"], True)
+
+    def test_one_signature_per_record(self):
+        PdfSignature.objects.create(file_id=self.file_id, key_pair=self.pair, signer_fingerprint="x")
+        with self.assertRaises(DatabaseIntegrityError):
+            PdfSignature.objects.create(file_id=self.file_id, key_pair=self.pair, signer_fingerprint="x")
+
+    def test_signing_key_is_protected_while_a_signature_uses_it(self):
+        PdfSignature.objects.create(file_id=self.file_id, key_pair=self.pair, signer_fingerprint="x")
+        with self.assertRaises(ProtectedError):
+            self.pair.delete()
+
+    def test_deleting_the_record_deletes_its_signature_row(self):
+        PdfSignature.objects.create(file_id=self.file_id, key_pair=self.pair, signer_fingerprint="x")
+        self.client.delete(f"/api/files/{self.file_id}/")
+        self.assertFalse(PdfSignature.objects.exists())

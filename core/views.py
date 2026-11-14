@@ -275,7 +275,11 @@ class FileListCreateView(APIView):
 
     def get(self, request):
         password = require_password(request)
-        files = StoredFile.objects.filter(owner=request.user).prefetch_related("ciphertexts", "labels")
+        files = (
+            StoredFile.objects.filter(owner=request.user)
+            .select_related("signature")
+            .prefetch_related("ciphertexts", "labels")
+        )
         category = request.query_params.get("category")
         if category:
             files = files.filter(category=category.upper())
