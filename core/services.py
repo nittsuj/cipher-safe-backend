@@ -39,7 +39,7 @@ from .constants import (
     REQUEST_REVOKED,
     SUPPORTED_ALGORITHMS,
 )
-from .signing import AlreadySigned, NotAPdf, is_pdf, sign_pdf
+from .signing import AlreadySigned, NotAPdf, VerificationResult, is_pdf, sign_pdf, verify_pdf
 from .exceptions import EnvelopeMismatch, InvalidTransition, NotRedeemed, RequesterHasNoKey
 from .crypto import (
     SYMMETRIC_KEY_SIZE,
@@ -597,12 +597,12 @@ def redeem_item(item: GrantedItem, requester_password: str, envelope_text: str) 
     return item
 
 
-def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
-    """Decrypt a redeemed item for the requester.
+def decrypt_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a redeemed item for the requester, without counting an access.
 
     Returns ``(label, data)``: for a record its name, type and bytes; for a
     profile snapshot ``{"name": "profile.json", "content_type": "application/json"}``
-    and the JSON. Counts the access.
+    and the JSON.
     """
 
     shared_key = item.shared_key
@@ -612,13 +612,33 @@ def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str
     salt = bytes(shared_key.requester_salt)
     key = open_key_for_user(sealed, salt, requester_password, shared_key.aad("requester"))
     payload = decrypt_with_key(item.sealed(), key, item.aad)
-    GrantedItem.objects.filter(pk=item.pk).update(
-        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
-    )
     if item.kind == GRANT_KIND_PROFILE:
         return {"name": "profile.json", "content_type": "application/json"}, payload
     return unpack_share_payload(payload)
 
+
+def open_item(item: GrantedItem, requester_password: str) -> tuple[dict[str, str], bytes]:
+    """Decrypt a redeemed item for the requester and count the access."""
+
+    label, data = decrypt_item(item, requester_password)
+    GrantedItem.objects.filter(pk=item.pk).update(
+        access_count=F("access_count") + 1, last_accessed_at=timezone.now()
+    )
+    return label, data
+
+
+def verify_shared_item(item: GrantedItem, requester_password: str) -> dict:
+    """Check a shared PDF's signature against the **owner's** certificates.
+
+    A shared copy is a snapshot from approval time: it carries a signature only
+    if the PDF was signed before it was shared. Checking doesn't count as an
+    access. Raises ``NotAPdf`` for a profile snapshot or another file type.
+    """
+
+    if item.kind == GRANT_KIND_PROFILE:
+        raise NotAPdf("Only PDFs have signatures.")
+    _, data = decrypt_item(item, requester_password)
+    return verify_pdf_bytes(item.request.owner, data)
 
 
 # ------------------------------------------------- ending access
@@ -719,3 +739,32 @@ def sign_stored_pdf(stored_file: StoredFile, password: str) -> StoredFile:
             sign_ms=signed.sign_ms,
         )
     return StoredFile.objects.select_related("signature").get(pk=stored_file.pk)
+
+
+def owner_certificates(owner) -> list:
+    """Every signing certificate the owner has had (rotated ones included), so
+    PDFs signed before a rotation still count as theirs."""
+
+    pairs = UserKeyPair.objects.filter(user=owner, purpose=KEY_PURPOSE_SIGNING).exclude(certificate_pem="")
+    return [load_certificate(pair.certificate_pem) for pair in pairs]
+
+
+def verify_pdf_bytes(owner, data: bytes) -> dict:
+    """Check a PDF's signature against the owner's certificates; the API shape.
+
+    Raises :class:`core.signing.NotAPdf` for bytes that aren't a PDF.
+    """
+
+    result: VerificationResult = verify_pdf(data, owner_certificates(owner))
+    key_log.info("verify owner=%s status=%s verify_ms=%.3f", owner.pk, result.status, result.verify_ms)
+    return result.as_dict()
+
+
+def verify_stored_file(stored_file: StoredFile, password: str) -> dict:
+    """Decrypt a stored record in memory and check its signature."""
+
+    data = decrypt_file(stored_file.ciphertexts.get(algorithm="AES"), password).plaintext
+    report = verify_pdf_bytes(stored_file.owner, data)
+    signature = PdfSignature.objects.filter(file=stored_file).first()
+    report["signed_at"] = signature.signed_at if signature else None
+    return report

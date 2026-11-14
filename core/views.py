@@ -31,7 +31,7 @@ from .constants import (
     SUPPORTED_ALGORITHMS,
 )
 from .exceptions import Conflict
-from .signing import AlreadySigned, PdfSigningError
+from .signing import AlreadySigned, NotAPdf, PdfSigningError
 from .crypto import IntegrityError, certificate_der, load_certificate
 from .models import (
     AccessRequest,
@@ -73,6 +73,8 @@ from .services import (
     revoke_request,
     sign_pdf_for,
     sign_stored_pdf,
+    verify_shared_item,
+    verify_stored_file,
     rotate_key_pair,
     approve_request,
     benchmark_decryption,
@@ -372,6 +374,21 @@ class FileSignView(APIView):
             raise ValidationError({"file": str(exc)})
         labels = {signed_file.pk: decrypt_file_label(signed_file, password)}
         return Response(StoredFileSerializer(signed_file, context={"labels": labels}).data)
+
+
+class FileSignatureView(APIView):
+    """Check a stored PDF's signature: decrypted in memory, checked against the
+    owner's own certificates. Unsigned PDFs report ``unsigned``; non-PDFs 400."""
+
+    permission_classes = PATIENT_ONLY
+
+    def get(self, request, pk: int):
+        password = require_password(request)
+        stored_file = get_object_or_404(StoredFile, pk=pk, owner=request.user)
+        try:
+            return Response(verify_stored_file(stored_file, password))
+        except NotAPdf as exc:
+            raise ValidationError({"file": str(exc)})
 
 
 class FileDownloadView(APIView):
@@ -790,3 +807,18 @@ class UserCertificateView(APIView):
         owner = get_object_or_404(User, username=username)
         pair = UserKeyPair.objects.filter(user=owner, purpose=KEY_PURPOSE_SIGNING, active=True).first()
         return certificate_response(pair, owner.username)
+
+
+class GrantedItemSignatureView(APIView):
+    """The requester checks a shared PDF's signature, against the owner's
+    certificates. Needs their password; 400 for anything that isn't a PDF."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int, item_id: int):
+        password = require_password(request)
+        item = _requested_item(request.user, pk, item_id)
+        try:
+            return Response(verify_shared_item(item, password))
+        except NotAPdf as exc:
+            raise ValidationError({"file": str(exc)})

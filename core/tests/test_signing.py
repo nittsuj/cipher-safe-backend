@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -9,16 +13,26 @@ from django.db import IntegrityError as DatabaseIntegrityError
 from django.db.models import ProtectedError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase
+from django.utils import timezone
+from pyhanko.pdf_utils import generic
+from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
 from pyhanko.pdf_utils.reader import PdfFileReader
 from pyhanko.sign.validation import validate_pdf_signature
 from pyhanko_certvalidator import ValidationContext
 from rest_framework import status
 
 from ..constants import KEY_PURPOSE_SIGNING
-from ..crypto import build_signing_certificate, certificate_der, generate_rsa_key_pair, load_certificate
-from ..models import PdfSignature, StoredFile, User, UserKeyPair
-from ..services import ensure_key_pair
-from ..signing import SIGNATURE_FIELD, AlreadySigned, EncryptedPdf, NotAPdf, is_pdf, sign_pdf
+from ..crypto import (
+    build_signing_certificate,
+    certificate_der,
+    certificate_fingerprint,
+    certificate_pem,
+    generate_rsa_key_pair,
+    load_certificate,
+)
+from ..models import AccessRequest, GrantedItem, PdfSignature, PersonalData, StoredFile, User, UserKeyPair
+from ..services import ensure_key_pair, store_personal_data
+from ..signing import SIGNATURE_FIELD, AlreadySigned, EncryptedPdf, NotAPdf, is_pdf, sign_pdf, verify_pdf
 from .base import PASSWORD, AuthenticatedApiTestCase
 
 SAMPLE = (Path(__file__).parent / "fixtures" / "sample.pdf").read_bytes()
@@ -259,3 +273,203 @@ class SignStoredPdfTests(PdfUploadHelpers):
         login = self.client.post("/api/auth/login/", {"username": "citra", "password": PASSWORD}, format="json")
         self._auth(access=login.json()["access"])
         self.assertEqual(self._sign(file_id).status_code, status.HTTP_404_NOT_FOUND)
+
+
+class VerifyPdfTests(SimpleTestCase):
+    """verify_pdf: intact, valid, signer, and changes after signing."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.key = generate_rsa_key_pair()
+        cls.owner = build_signing_certificate(cls.key, "alice")
+        cls.signed, _ = sign_pdf(SAMPLE, cls.key, cls.owner, "alice")
+
+    def test_verify_valid_signed_pdf(self):
+        result = verify_pdf(self.signed, [self.owner])
+        self.assertEqual(result.status, "valid")
+        self.assertTrue(result.intact and result.valid and result.signer_matches_owner)
+        self.assertEqual(result.coverage, "ENTIRE_FILE")
+        self.assertFalse(result.modified_after_signing)
+        self.assertEqual(result.signer_common_name, "alice")
+        self.assertEqual(result.signer_fingerprint, certificate_fingerprint(self.owner))
+        self.assertEqual(result.as_dict()["signer"]["common_name"], "alice")
+
+    def test_verify_detects_byte_change_inside_signed_range(self):
+        tampered = bytearray(self.signed)
+        position = self.signed.index(b"HbA1c 7.1")
+        tampered[position + 6] = ord("9")
+        result = verify_pdf(bytes(tampered), [self.owner])
+        self.assertEqual(result.status, "modified")
+        self.assertFalse(result.intact)
+
+    def test_verify_detects_appended_content(self):
+        writer = IncrementalPdfFileWriter(BytesIO(self.signed))
+        writer.root["/Lang"] = generic.TextStringObject("en")
+        writer.update_root()
+        out = BytesIO()
+        writer.write(out)
+        result = verify_pdf(out.getvalue(), [self.owner])
+        self.assertEqual(result.status, "modified")
+        self.assertTrue(result.intact)  # the signed part itself is unchanged
+        self.assertTrue(result.modified_after_signing)
+        self.assertEqual(result.coverage, "ENTIRE_REVISION")
+
+    def test_verify_other_users_certificate_is_unknown_signer(self):
+        someone_else = build_signing_certificate(generate_rsa_key_pair(), "budi")
+        result = verify_pdf(self.signed, [someone_else])
+        self.assertEqual(result.status, "unknown_signer")
+        self.assertTrue(result.intact and result.valid)
+        self.assertFalse(result.signer_matches_owner)
+
+    def test_any_of_the_owners_certificates_counts(self):
+        rotated = build_signing_certificate(generate_rsa_key_pair(), "alice")
+        self.assertEqual(verify_pdf(self.signed, [rotated, self.owner]).status, "valid")
+
+    def test_verify_unsigned_pdf(self):
+        result = verify_pdf(SAMPLE, [self.owner])
+        self.assertEqual((result.status, result.signed), ("unsigned", False))
+        self.assertIsNone(result.as_dict()["signer"])
+
+    def test_verify_non_pdf_is_refused(self):
+        with self.assertRaises(NotAPdf):
+            verify_pdf(b"hello", [self.owner])
+
+    def test_openssl_verifies_the_signature_independently(self):
+        """Outside pyHanko: openssl checks the CMS over the signed byte ranges."""
+        if shutil.which("openssl") is None:
+            self.skipTest("openssl is not installed")
+        [signature] = PdfFileReader(BytesIO(self.signed)).embedded_signatures
+        a, b, c, d = signature.byte_range
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = {name: os.path.join(tmp, name) for name in ("sig.p7s", "content.bin", "owner.pem")}
+            Path(paths["sig.p7s"]).write_bytes(signature.pkcs7_content)
+            Path(paths["content.bin"]).write_bytes(self.signed[a : a + b] + self.signed[c : c + d])
+            Path(paths["owner.pem"]).write_text(certificate_pem(self.owner))
+            result = subprocess.run(
+                [
+                    "openssl", "cms", "-verify", "-binary", "-inform", "DER",
+                    "-in", paths["sig.p7s"], "-content", paths["content.bin"],
+                    "-CAfile", paths["owner.pem"], "-purpose", "any", "-out", os.devnull,
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Verification successful", result.stderr)
+
+
+class SignatureStatusApiTests(PdfUploadHelpers):
+    """GET /api/files/{id}/signature/."""
+
+    def _status(self, file_id):
+        return self.client.get(f"/api/files/{file_id}/signature/")
+
+    def test_signed_record_is_valid(self):
+        file_id = self._upload_pdf().json()["id"]
+        response = self._status(file_id)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        body = response.json()
+        self.assertEqual(body["status"], "valid")
+        self.assertEqual(body["signer"]["common_name"], "alice")
+        self.assertTrue(body["signer_matches_owner"])
+        self.assertEqual(body["coverage"], "ENTIRE_FILE")
+        self.assertIsNotNone(body["signed_at"])
+        pair = UserKeyPair.objects.get(purpose=KEY_PURPOSE_SIGNING)
+        self.assertEqual(body["signer"]["fingerprint"], pair.fingerprint)
+
+    def test_still_valid_after_the_key_is_rotated(self):
+        file_id = self._upload_pdf().json()["id"]
+        self.client.post("/api/me/keys/", {"purpose": "SIGNING", "rotate": True}, format="json")
+        self.assertEqual(self._status(file_id).json()["status"], "valid")
+
+    def test_unsigned_pdf_reports_unsigned(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        body = self._status(file_id).json()
+        self.assertEqual((body["status"], body["signed"], body["signed_at"]), ("unsigned", False, None))
+
+    def test_pdf_signed_by_someone_else_is_unknown_signer(self):
+        other_key = generate_rsa_key_pair()
+        foreign, _ = sign_pdf(SAMPLE, other_key, build_signing_certificate(other_key, "mallory"), "mallory")
+        file_id = self._upload_pdf(data=foreign, sign=False).json()["id"]
+        body = self._status(file_id).json()
+        self.assertEqual(body["status"], "unknown_signer")
+        self.assertEqual(body["signer"]["common_name"], "mallory")
+
+    def test_non_pdf_is_400(self):
+        file_id = self._upload_pdf(data=b"plain", sign=False, content_type="text/plain", name="a.txt").json()["id"]
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_needs_password_and_ownership(self):
+        file_id = self._upload_pdf().json()["id"]
+        self._auth(password="not-the-password")
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_403_FORBIDDEN)
+        User.objects.create_user("citra", password=PASSWORD)
+        login = self.client.post("/api/auth/login/", {"username": "citra", "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+        self.assertEqual(self._status(file_id).status_code, status.HTTP_404_NOT_FOUND)
+
+
+class SharedPdfSignatureTests(PdfUploadHelpers):
+    """GET /api/access-requests/{id}/items/{item_id}/signature/ (requester)."""
+
+    def setUp(self):
+        super().setUp()
+        self.budi = User.objects.create_user("budi", password=PASSWORD, role="DOCTOR")
+        ensure_key_pair(self.budi, "ENCRYPTION", PASSWORD)
+        self.alice = User.objects.get(username="alice")
+
+    def _share(self, file_id, include_profile=False):
+        """alice grants ``file_id`` to budi; budi redeems everything. Returns (request id, items)."""
+        request_id = AccessRequest.objects.create(requester=self.budi, owner=self.alice).pk
+        items = self.client.post(
+            f"/api/access-requests/{request_id}/approve/",
+            {"file_ids": [file_id], "include_profile": include_profile},
+            format="json",
+        ).json()["items"]
+        self._as("budi")
+        for item in items:
+            url = f"/api/access-requests/{request_id}/items/{item['item_id']}/redeem/"
+            self.assertEqual(self.client.post(url, {"envelope": item["envelope"]}, format="json").status_code, 200)
+        return request_id, items
+
+    def _as(self, username):
+        login = self.client.post("/api/auth/login/", {"username": username, "password": PASSWORD}, format="json")
+        self._auth(access=login.json()["access"])
+
+    def _check(self, request_id, item):
+        return self.client.get(f"/api/access-requests/{request_id}/items/{item['item_id']}/signature/")
+
+    def test_signed_pdf_is_valid_for_the_owner_when_checked_by_the_requester(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        body = self._check(request_id, item).json()
+        self.assertEqual(body["status"], "valid")
+        self.assertEqual(body["signer"]["common_name"], "alice")
+        self.assertEqual(GrantedItem.objects.get(pk=item["item_id"]).access_count, 0)  # checking isn't opening
+
+    def test_pdf_shared_before_signing_stays_unsigned(self):
+        file_id = self._upload_pdf(sign=False).json()["id"]
+        request_id, [item] = self._share(file_id)
+        self._as("alice")
+        self.client.post(f"/api/files/{file_id}/sign/")  # signed after it was shared
+        self._as("budi")
+        self.assertEqual(self._check(request_id, item).json()["status"], "unsigned")
+
+    def test_profile_item_is_400(self):
+        store_personal_data(PersonalData.objects.create(owner=self.alice), PASSWORD, {"full_name": "Alice"})
+        request_id, items = self._share(self._upload_pdf().json()["id"], include_profile=True)
+        profile = next(i for i in items if i["kind"] == "PROFILE")
+        self.assertEqual(self._check(request_id, profile).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_owner_and_outsiders_cannot_use_it(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        self._as("alice")
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_403_FORBIDDEN)
+        User.objects.create_user("citra", password=PASSWORD)
+        self._as("citra")
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_not_after_access_ends(self):
+        request_id, [item] = self._share(self._upload_pdf().json()["id"])
+        AccessRequest.objects.filter(pk=request_id).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(self._check(request_id, item).status_code, status.HTTP_404_NOT_FOUND)
