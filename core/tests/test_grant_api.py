@@ -50,8 +50,8 @@ class ApproveApiTests(AuthenticatedApiTestCase):
         self.assertEqual(body["request"]["status"], "APPROVED")
         self.assertIsNotNone(body["request"]["expires_at"])
         self.assertEqual(body["recipient_fingerprint"], self.budi_pair.fingerprint)
-        kinds = [(i["kind"], i["category"]) for i in body["items"]]
-        self.assertEqual(kinds, [("FILE", "DOCUMENT"), ("PROFILE", None)])
+        kinds = [(i["kind"], i["file_id"], i["category"]) for i in body["items"]]
+        self.assertEqual(kinds, [("FILE", self.file_id, "DOCUMENT"), ("PROFILE", None, None)])
         for item in body["items"]:
             envelope = parse_envelope(item["envelope"])
             self.assertEqual((envelope.request_id, envelope.item_id), (self.request_id, item["item_id"]))

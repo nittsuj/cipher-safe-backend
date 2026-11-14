@@ -727,6 +727,7 @@ class AccessRequestApproveView(APIView):
                     {
                         "item_id": item.pk,
                         "kind": item.kind,
+                        "file_id": item.file_id,
                         "category": item.file.category if item.file else None,
                         "envelope": envelope,
                     }
