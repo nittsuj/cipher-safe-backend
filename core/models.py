@@ -253,12 +253,14 @@ class UserKeyPair(models.Model):
     purpose = models.CharField(max_length=10, choices=KEY_PURPOSE_CHOICES)
     algorithm = models.CharField(max_length=16, default=RSA_ALGORITHM)
     public_key_pem = models.TextField()
-    #: Self-signed X.509 certificate, only for signing keys.
+    #: Self-signed X.509 certificate (PEM), only for signing keys.
     certificate_pem = models.TextField(blank=True)
     #: PKCS#8 private key encrypted with AES-256-GCM, tag appended.
     encrypted_private_key = models.BinaryField()
     kek_salt = models.BinaryField()
     nonce = models.BinaryField()
+    #: SHA-256, ``AB:CD:...``: of the public key, or for a signing pair of its
+    #: certificate (what PDF readers show).
     fingerprint = models.CharField(max_length=95, db_index=True)
     active = models.BooleanField(default=True)
     generation_ms = models.FloatField(default=0.0)
