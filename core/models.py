@@ -2,8 +2,18 @@ from __future__ import annotations
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
-from .constants import ALGORITHM_CHOICES, FILE_CATEGORY_CHOICES, KEY_PURPOSE_CHOICES, ROLE_CHOICES, ROLE_PATIENT
+from .constants import (
+    ALGORITHM_CHOICES,
+    FILE_CATEGORY_CHOICES,
+    KEY_PURPOSE_CHOICES,
+    REQUEST_CATEGORY_CHOICES,
+    REQUEST_PENDING,
+    REQUEST_STATUS_CHOICES,
+    ROLE_CHOICES,
+    ROLE_PATIENT,
+)
 from .crypto import RSA_ALGORITHM, WrappedKey
 from .crypto import decrypt as decrypt_payload
 
@@ -301,3 +311,42 @@ class UserKeyPair(models.Model):
     def __str__(self) -> str:
         state = "active" if self.active else "inactive"
         return f"{self.user} {self.purpose} {self.algorithm} ({state})"
+
+
+class AccessRequest(models.Model):
+    """One user asking to see another user's private data.
+
+    The requester can't name a file (file names are encrypted), so they send a
+    message and an optional category hint; the owner decides what, if
+    anything, to grant. Nothing here is secret, so no password is needed to
+    create, list, deny or cancel a request.
+    """
+
+    requester = models.ForeignKey(User, on_delete=models.CASCADE, related_name="outgoing_requests")
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="incoming_requests")
+    message = models.CharField(max_length=500, blank=True)
+    category = models.CharField(max_length=12, choices=REQUEST_CATEGORY_CHOICES, blank=True)
+    status = models.CharField(max_length=9, choices=REQUEST_STATUS_CHOICES, default=REQUEST_PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    #: When the owner approved, denied or revoked it (or the requester cancelled).
+    decided_at = models.DateTimeField(null=True, blank=True)
+    #: End of granted access; set on approval.
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [
+            models.CheckConstraint(condition=~models.Q(requester=models.F("owner")), name="request_not_to_self"),
+            models.UniqueConstraint(
+                fields=["requester", "owner"],
+                condition=models.Q(status=REQUEST_PENDING),
+                name="uniq_pending_request",
+            ),
+        ]
+
+    @property
+    def expired(self) -> bool:
+        return self.expires_at is not None and self.expires_at <= timezone.now()
+
+    def __str__(self) -> str:
+        return f"{self.requester} -> {self.owner} ({self.status})"
