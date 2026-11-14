@@ -451,15 +451,21 @@ def cancel_request(access_request: AccessRequest) -> AccessRequest:
 # ------------------------------------------------- approving with item keys
 
 
+def user_kek(password: str, salt: bytes) -> bytes:
+    """Key-encryption key for one user's stored copies of item keys: PBKDF2 of
+    their password, the same protection as their own data."""
+
+    return derive_key(password, salt, SYMMETRIC_KEY_SIZE)
+
+
 def seal_key_for_user(key: bytes, password: str, aad: bytes) -> tuple[SealedData, bytes]:
     """Encrypt an item key with a key derived from a user's password.
 
-    Returns ``(sealed, salt)``. Same protection as the user's own data:
-    PBKDF2 (fresh salt) then AES-256-GCM.
+    Returns ``(sealed, salt)``: PBKDF2 with a fresh salt, then AES-256-GCM.
     """
 
     salt = new_salt()
-    return encrypt_with_key(key, derive_key(password, salt, SYMMETRIC_KEY_SIZE), aad), salt
+    return encrypt_with_key(key, user_kek(password, salt), aad), salt
 
 
 def open_key_for_user(sealed: SealedData, salt: bytes, password: str, aad: bytes) -> bytes:
@@ -504,10 +510,15 @@ def _grant_item(access_request, owner_password, stored_file, requester_pair, req
     wrap_ms = (time.perf_counter() - started) * 1000
 
     shared_key = SharedKey(item=item, envelope_sha256=envelope_digest(wrapped), requester_key=requester_pair)
-    sealed_for_owner, owner_salt = seal_key_for_user(key, owner_password, shared_key.aad("owner"))
-    shared_key.key_for_owner = sealed_for_owner.ciphertext
-    shared_key.owner_nonce = sealed_for_owner.nonce
+    # One PBKDF2 derivation protects both the owner's copy of K and of the
+    # envelope; each gets its own nonce and associated data.
+    owner_salt = new_salt()
+    owner_kek = user_kek(owner_password, owner_salt)
+    sealed_key = encrypt_with_key(key, owner_kek, shared_key.aad("owner"))
+    sealed_envelope = encrypt_with_key(wrapped, owner_kek, shared_key.aad("envelope"))
     shared_key.owner_salt = owner_salt
+    shared_key.key_for_owner, shared_key.owner_nonce = sealed_key.ciphertext, sealed_key.nonce
+    shared_key.envelope_for_owner, shared_key.envelope_nonce = sealed_envelope.ciphertext, sealed_envelope.nonce
     shared_key.save()
 
     key_log.info("wrap item=%s rsa_oaep_ms=%.3f", item.pk, wrap_ms)
@@ -526,8 +537,8 @@ def approve_request(
 
     Returns the updated request, the requester's key pair (its fingerprint is
     shown to the owner) and ``(item, envelope)`` pairs. The envelopes are what
-    the owner sends to the requester out of band; the server keeps only their
-    hashes. ``files`` must already be checked to belong to the owner.
+    the owner sends to the requester out of band; the server keeps them only
+    encrypted for the owner, plus their hashes. ``files`` must already be checked to belong to the owner.
     """
 
     if not files and not include_profile:
@@ -557,3 +568,16 @@ def approve_request(
         locked.expires_at = now + timedelta(hours=expires_hours)
         locked.save(update_fields=["status", "decided_at", "expires_at"])
     return locked, requester_pair, grants
+
+
+def envelope_for_owner(item: GrantedItem, owner_password: str) -> str:
+    """The envelope of an item, exactly as first shown, for the owner to send again.
+
+    Raises ``IntegrityError`` for a wrong password.
+    """
+
+    shared_key = item.shared_key
+    sealed = SealedData(bytes(shared_key.envelope_nonce), bytes(shared_key.envelope_for_owner))
+    owner_kek = user_kek(owner_password, bytes(shared_key.owner_salt))
+    wrapped = decrypt_with_key(sealed, owner_kek, shared_key.aad("envelope"))
+    return format_envelope(item.request_id, item.pk, wrapped)

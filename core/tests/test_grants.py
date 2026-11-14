@@ -29,6 +29,7 @@ from ..models import AccessRequest, GrantedItem, PersonalData, SharedKey, Stored
 from ..services import (
     approve_request,
     ensure_key_pair,
+    envelope_for_owner,
     load_private_key,
     open_key_for_user,
     store_personal_data,
@@ -194,7 +195,14 @@ class ApproveRequestTests(TestCase):
         with self.assertRaises(IntegrityError):
             open_key_for_user(sealed, bytes(shared.owner_salt), "not-the-password", shared.aad("owner"))
 
-    def test_only_the_envelope_hash_is_stored(self):
+    def test_owner_gets_the_same_envelope_again(self):
+        _, _, [(item, envelope)] = self._approve()
+        item = GrantedItem.objects.get(pk=item.pk)
+        self.assertEqual(envelope_for_owner(item, PASSWORD), envelope)
+        with self.assertRaises(IntegrityError):
+            envelope_for_owner(item, "not-the-password")
+
+    def test_envelope_hash_and_requester_key_are_stored(self):
         _, _, [(item, envelope)] = self._approve()
         self.assertEqual(item.shared_key.envelope_sha256, envelope_digest(parse_envelope(envelope).wrapped_key))
         self.assertIsNone(item.shared_key.key_for_requester)

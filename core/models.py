@@ -413,8 +413,11 @@ class SharedKey(models.Model):
       key, so the owner can show the envelope again without a new key.
     * ``key_for_requester``: the same key under the **requester's**
       password-derived key, written when they redeem the envelope.
+    * ``envelope_for_owner``: the RSA-wrapped key (the envelope) encrypted
+      under the same owner key, so the owner can show the **same** envelope
+      again. OAEP is randomised, so rebuilding it would give a different one.
     * ``envelope_sha256``: hash of the RSA-wrapped key, to check a pasted
-      envelope. The envelope itself isn't stored.
+      envelope before any RSA work.
 
     The plain key is never stored.
     """
@@ -423,6 +426,8 @@ class SharedKey(models.Model):
     key_for_owner = models.BinaryField()
     owner_salt = models.BinaryField()
     owner_nonce = models.BinaryField()
+    envelope_for_owner = models.BinaryField(default=b"")
+    envelope_nonce = models.BinaryField(default=b"")
     key_for_requester = models.BinaryField(null=True, blank=True)
     requester_salt = models.BinaryField(null=True, blank=True)
     requester_nonce = models.BinaryField(null=True, blank=True)
